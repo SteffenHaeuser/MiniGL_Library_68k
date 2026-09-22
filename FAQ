@@ -1,0 +1,27 @@
+FAQ
+
+What is PiStorm3D? What is minigl.library?
+
+PiStorm3D is a static MiniGL for PiStorm VideoCore VI. minigl.library is an OpenSource API for 3DHW on the 68k Amiga. This archive includes a version of minigl.library for PiStorm3D.
+
+What Systems are supported by it?
+
+Currently only Pi4/CM4/4B. On 8th October 2026 a version for classic MiniGL-systems will be released (Voodoo3 etc.). An external developer is working on an OpenPCI based Radeon 9200 version.
+Also Claude Schwarz is working on a version for Pi3. A (limited feature) version for Apollo Vampire is in evaluation (though the Vampire will have much lower fps and limited features).
+
+On my system it does not run. What am I doing wrong?
+
+Check that Picasso96API.library, rtg.library and Emulation.library all come from the same version of Picasso96. While 2D Stuff works with "mixed" installations, PiStorm3D requires all
+to come from the same version. Especially effects like "green display" or "does not work in fullscreen" or "repeated crashes" are a sign of "mixed"  Picasso96 Libraries.
+
+Will PiStorm3D support PiStormPPC?
+
+A version of minigl.library (called MiniGLWOS) for WarpOS already exists. It is only for Classic Devices (like Voodoo 3 etc.) though. Most likely the most recent version will be 
+released on 8th October 2026. If a version for PiStorm3D for PiStormPPC will be recompiled and if this needs additional funds will be discussed with the developer of PiStorm3D.
+But the technical basis for it exists already.
+
+What about support for A1200NG or THEA1200 or AmiKit ?
+
+They are based on AmiBerry. Giving them a 3D API would require an update on AmiBerry which allows calls to the Host OS. Currently this does not exist. But I described minigl.library
+to the makers of them in advance.  While there was some answer from Cloanto there was no answer at all from Amigakit. But minigl.library is OpenSource, so if they have a way to
+adapt it to their hardware - they can just do it. Of course the resulting new version of minigl.library needs to be OpenSource as well.
