@@ -1,0 +1,44 @@
+CC := m68k-amigaos-gcc
+AS := m68k-amigaos-as
+AR := m68k-amigaos-ar
+CPU := 68020
+OBJDIR ?= obj_gcc_dispatch
+EXOBJDIR ?= obj_gcc_examples_dispatch
+OUTDIR ?= bin/dispatch-pistorm3d-gcc
+BINDIR ?= bin
+PISTORM3D_INC ?= third_party/pistorm3d/gl/include
+PISTORM3D_LIB ?= third_party/pistorm3d/libminiglv3d.a
+PISTORM3D_EXTRA ?=
+
+COMMON_CFLAGS = -std=c99 -mcrt=clib2 -mcpu=68020 -m68881 -O3 -fno-strict-aliasing -fno-builtin-cos -fno-builtin-sin -fsigned-char
+LIB_CFLAGS = $(COMMON_CFLAGS) -I$(PISTORM3D_INC) -Iinclude -Ilibrary -D__M68K__ -DPISTORM3D -DMINIGL_BACKEND_PISTORM3D -DMINIGL_LIBRARY_BUILD -fno-baserel -fno-builtin -Wall -Wextra
+EX_CFLAGS = $(COMMON_CFLAGS) -Iinclude
+LIB_OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_pistorm3d.o $(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o $(OBJDIR)/pistorm3d_stubs.o $(OBJDIR)/memcmp_shim.o
+CLIENT_OBJS = $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub_gcc.o
+IMPORTLIB = lib/libminigl_dispatch.a
+.PHONY: all clean importlib testprograms
+all: $(OUTDIR)/minigl.library
+$(OBJDIR) $(EXOBJDIR) $(OUTDIR) $(BINDIR) lib:
+	mkdir -p $@
+$(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+$(OUTDIR)/minigl.library: $(LIB_OBJS) $(PISTORM3D_LIB) $(PISTORM3D_EXTRA) | $(OUTDIR)
+	$(CC) -nostdlib -nostartfiles -nodefaultlibs -noixemul -o $@ -Wl,--start-group $(LIB_OBJS) $(PISTORM3D_LIB) $(PISTORM3D_EXTRA) -lm -lgcc -Wl,--end-group
+$(EXOBJDIR)/minigl_base.o: client/minigl_base.c | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_open.o: client/minigl_open.c | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_dispatch_stub_gcc.o: client/minigl_dispatch_stub_gcc.s | $(EXOBJDIR)
+	$(CC) -mcpu=$(CPU) -c $< -o $@
+importlib: $(IMPORTLIB)
+$(IMPORTLIB): $(CLIENT_OBJS) | lib
+	$(AR) rcs $@ $(CLIENT_OBJS)
+testprograms: importlib | $(BINDIR)
+	$(CC) $(EX_CFLAGS) examples/library_test.c $(IMPORTLIB) -o $(BINDIR)/library_test_dispatch_gcc
+	$(CC) $(EX_CFLAGS) examples/milestone_ballonly_library.c $(IMPORTLIB) -lm -o $(BINDIR)/milestone_ballonly_dispatch_gcc
+	$(CC) $(EX_CFLAGS) examples/milestone_bounce_interactive_library.c $(IMPORTLIB) -lm -o $(BINDIR)/milestone_bounce_dispatch_gcc
+	$(CC) $(EX_CFLAGS) examples/milestone_gears_stats_library.c $(IMPORTLIB) -lm -o $(BINDIR)/milestone_gears_dispatch_gcc
+	$(CC) $(EX_CFLAGS) examples/warp_library.c $(IMPORTLIB) -lm -o $(BINDIR)/warp_dispatch_gcc
+clean:
+	rm -rf $(OBJDIR) $(EXOBJDIR) $(OUTDIR)
+	rm -f $(IMPORTLIB) $(BINDIR)/*_dispatch_gcc
