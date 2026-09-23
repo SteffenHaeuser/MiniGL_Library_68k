@@ -10,28 +10,35 @@ The MiniGLV3D sources, V3D backend, GCC build support and development test and d
 
 ## Source Code
 
-Source code was published in a Git repository. The location is:
+The source repository for this release is:
 
-[PiStorm3D source repository](https://github.com/SteffenHaeuser/PiStorm3D)
+[PiStorm3D source repository](https://github.com/SteffenHaeuser/MiniGL_Library_68k)
 
 The build instructions and references to source directories below apply to a checkout of that repository.
 
 ## Status
 
-PiStorm3D is based on MiniGL V1.2 and implements its API together with additional extensions, equivalent to what was done on MiniGLQ3, but developed independent of this extension.
+PiStorm3D is based on MiniGL V1.2 and implements its API together with independently developed extensions that provide functionality equivalent to the additions in MiniGLQ3. No MiniGLQ3 code was used in PiStorm3D.
 
 MiniGL V1.2 operates under the Hyperion MiniGL Open Source License. The complete license is included as a separate file with this distribution.
 
 PiStorm3D is included in two forms:
 
 * A static linker library for creating executables which run directly on PiStorm systems using Raspberry Pi 4 / CM4 / 4B hardware.
-* An implementation based on the new `minigl.library` 3D standard. This allows software to run both on PiStorm Pi4/CM4/4B systems and on other supported hardware by installing a suitable `minigl.library` implementation for the target hardware.
+* An implementation using the shared `minigl.library` interface. This allows software to run both on PiStorm Pi4/CM4/4B systems
+* and on other supported hardware by installing a suitable 'minigl.library' implementation for the target hardware.
 
 A `minigl.library` implementation for classic MiniGL-compatible hardware will be available on Aminet.
 
 A minigl.library implementation for Radeon 9200 hardware is currently under development by an independent third-party developer and is not part of the PiStorm3D project.
 
 A minigl.library implementation for PiStorm systems with Pi3 is in development by an independent third-party developer and is not part of the PiStorm3D project.
+
+A minigl.library for the Copperline Amiga Emulator (communicating with the Host systems GL Implementation) is in development by a independent third-party developer.
+
+Also minigl.library Sources were provided to a developer considering an implementation for Matrox Graphics Cards.
+
+A version of the source code was also provided to Apollo Computer. This is not only about PiStorm3D. It is a new OpenSource 3D Standard for AmigaOS 68k.
 
 minigl.library is distributed under the Hyperion MiniGL Open Source License, except for incorporated third-party components which remain under their respective original licenses.
 
@@ -46,7 +53,7 @@ PiStorm3D requires:
 * RTG graphics
 * `cybergraphics.library` or Picasso96
 
-PiStorm3 is not supported because it uses a different 3D GPU architecture.
+PiStorm systems using Raspberry Pi 3 are not supported by this implementation because their GPU requires a different backend.
 
 ## MiniGL API
 
@@ -117,12 +124,13 @@ MiniGL-specific context and configuration functions include:
 The supplied headers document that application-owned windows and bitmaps must outlive their contexts. For the PiStorm3D bitmap path, they specify a CGX-lockable bitmap with four bytes per pixel suitable for RGBA8 output; a reported depth of 24 alone does not exclude such a bitmap.
 
 See `mgl/gl.h` for declarations and static API macros, and `libraries/minigl_dispatch.h` for the shared-library API wrappers. Shared-library applications should include `<proto/minigl.h>`.
+
 ## Building the GCC Static Library
 
 From a source checkout, run:
 
 ```text
-build_lib_gcc_nolog.sh
+./build_lib_gcc_nolog.sh
 ```
 
 This builds the static GCC PiStorm3D MiniGL library without diagnostic logging.
@@ -173,18 +181,20 @@ We would like to take this opportunity to thank everyone involved in the project
 * paraj for information about VideoCore 3D hardware.
 * Macoy Madson and Mike, the Wandering Hacker, for extensive information, documentation and examples regarding programming of the VideoCore VI V3D GPU.
 * Hans-Jörg Frieden, Thomas Frieden and Christian "Surgeon" Michael for developing MiniGL V1.2.
-* CowCat for the MiniGLQ3 changes.
+* CowCat for developing the MiniGLQ3 extensions, whose functionality PiStorm3D implements independently.
 * Artur "arczi" Jarosik for supporting PiStorm3D with his games, including during the early development stages.
 * flype, Mr-Z, mbo77, vitosky70, Joacim Strand and Justin Webb for beta testing.
 * All people who donated money for PiStorm3D, especially Ben Hermans and Justin Webb for their initial substantial donations, which helped the crowdfunding campaign take off.
-* Alinea Computer and Claude for donating hardware to the project
+* Alinea Computer and Claude for donating hardware to the project.
 * Everybody who tested, reported bugs, provided information or otherwise helped the project.
 
 ## License
 
 PiStorm3D is based on MiniGL V1.2.
 
-The MiniGL-derived portions of PiStorm3D, including our modifications and extensions and the incorporated MiniGLQ3 changes where applicable, are distributed under the Hyperion MiniGL Open Source License.
+The MiniGL-derived portions of PiStorm3D, including our modifications and extensions, are distributed under the Hyperion MiniGL Open Source License.
+
+Original PiStorm3D code, including independently written V3D backend code, is also distributed under the Hyperion MiniGL Open Source License. Incorporated third-party code retains its original licence terms.
 
 The complete MiniGL license is included as a separate file with this distribution.
 
