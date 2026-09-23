@@ -127,11 +127,7 @@ See `mgl/gl.h` for declarations and static API macros, and `libraries/minigl_dis
 
 ## Building the GCC Static Library
 
-From a source checkout, run:
-
-```text
-./build_lib_gcc_nolog.sh
-```
+From a source checkout, run make
 
 This builds the static GCC PiStorm3D MiniGL library without diagnostic logging.
 
