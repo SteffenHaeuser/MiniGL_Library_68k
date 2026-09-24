@@ -1,0 +1,48 @@
+CROSS ?= /opt/amiga/bin/m68k-amigaos-
+CC := $(CROSS)gcc
+AR := $(CROSS)ar
+RANLIB := $(CROSS)ranlib
+
+MINIGL_ROOT := ..
+OBJDIR := $(MINIGL_ROOT)/Build_gcc65_demos
+LIBMGL := $(OBJDIR)/libmgl-q3-gcc65.a
+
+# GCC 6.5 folds matching sin()/cos() calls into cexp()/cexpf() on m68k.
+# This old MiniGL code is built with builtins disabled to retain the original
+# trigonometric calls used by the known-good Q3 build.
+CFLAGS := -O2 -m68040 -mhard-float -fno-builtin -fno-strict-aliasing \
+	-fomit-frame-pointer -noixemul -D__M68K__ -DNDEBUG \
+	-DINLINE=__inline -I$(MINIGL_ROOT)/include
+LDFLAGS := -m68040 -mhard-float -noixemul
+LDLIBS := $(LIBMGL) -ldebug -lm -lamiga
+
+LIB_SOURCES := context vertexbuffer draw texture fog hclip init glu aclip \
+	vertexelements vertexarray others matrix
+LIB_OBJECTS := $(addprefix $(OBJDIR)/,$(addsuffix .o,$(LIB_SOURCES)))
+
+DEMOS := GLTest addtest bounce driverinfo gears gears_stats gravity mtex \
+	rasonly smtest texsub varray varray_new warp
+DEMO_OBJECTS := $(addprefix $(OBJDIR)/demo_,$(addsuffix .o,$(DEMOS)))
+
+.PHONY: all clean
+
+all: $(DEMOS)
+
+$(OBJDIR):
+	mkdir -p $@
+
+$(OBJDIR)/%.o: $(MINIGL_ROOT)/src/%.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/demo_%.o: %.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(LIBMGL): $(LIB_OBJECTS)
+	$(AR) rcs $@ $^
+	$(RANLIB) $@
+
+$(DEMOS): %: $(OBJDIR)/demo_%.o $(LIBMGL)
+	$(CC) $(LDFLAGS) -o $@ $< $(LDLIBS)
+
+clean:
+	$(RM) $(DEMO_OBJECTS) $(LIB_OBJECTS) $(LIBMGL) $(DEMOS)

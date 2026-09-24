@@ -1,0 +1,114 @@
+#
+# $Id: makefile.vbcc68k,v 1.1.1.1 2000/04/07 19:44:48 tfrieden Exp $
+#
+# $Author: tfrieden $
+#
+# $Date: 2000/04/07 19:44:48 $
+# $Revision: 1.1.1.1 $
+#
+# Makefile for vbcc AmigaOS/68k by Frank Wille
+#
+# (C) 1999 by Hyperion Software
+# All rights reserved
+#
+# This file is part of the MiniGL library project
+# See the file Licence.txt for more details
+#
+#
+
+#INCLUDE =
+#DEBUG =
+
+# for 68k blitzglquake use -DFIXPOINT
+CFLAGS = -O2 -speed -c99 $(INCLUDE) -cpu=68060 -fpu=68060 -DNDEBUG
+
+OP_CFLAGS = -O2 -speed -c99 $(INCLUDE) -cpu=68060 -fpu=68060 -DNDEBUG $(DEBUG)
+
+#CFLAGS = -c99 -cpu=68060 -fpu=68060 
+
+#LIBS = -lm060 -lmgl060
+LIBNAME = mglQ3.lib
+DIR = Build060
+EXENAME = GLTest
+EXESRC = src/GLTest.c
+
+#DEMOS = GLTest warp varray gears mtex driverinfo rasonly
+
+CC=vc +aos68k
+AR=join as
+
+LIBOBJ = $(DIR)/init.o \
+$(DIR)/fog.o $(DIR)/others.o $(DIR)/texture.o \
+$(DIR)/context.o $(DIR)/matrix.o $(DIR)/vertexbuffer.o \
+$(DIR)/hclip.o $(DIR)/draw.o \
+$(DIR)/aclip.o $(DIR)/vertexarray.o $(DIR)/vertexelements.o
+
+all: $(LIBNAME) $(DEMOS)
+
+install:
+	copy include/mgl/#?.h vinclude68k:mgl
+
+#clean:
+#	delete force quiet $(DIR)/#?.o GLtest
+
+lib: $(LIBNAME)
+	@echo "Done"
+
+INCS = src/sysinc.h src/vertexarray.h include/mgl/clip.h include/mgl/config.h \
+       include/mgl/context.h include/mgl/gl.h include/mgl/log.h \
+       include/mgl/matrix.h include/mgl/minigl.h include/mgl/vertexbuffer.h
+
+
+driverinfo: demos/driverinfo.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o driverinfo demos/driverinfo.c $(LIBS)
+
+warp: demos/warp.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o warp demos/warp.c $(LIBS)
+
+varray: demos/varray_new.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o varray demos/varray_new.c $(LIBS)
+
+varray2: demos/varray.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o varray2 demos/varray.c $(LIBS)
+
+gears: demos/gears_stats.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o gears demos/gears_stats.c $(LIBS)
+
+mtex: demos/mtex.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o mtex demos/mtex.c $(LIBS)
+
+rasonly: demos/rasonly.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o rasonly demos/rasonly.c $(LIBS)
+
+
+
+$(LIBNAME): $(LIBOBJ)
+	$(AR) $(LIBNAME) $(LIBOBJ)
+
+$(EXENAME): $(EXESRC) $(LIBNAME)
+	$(CC) $(CFLAGS) -o $@ $(EXESRC) $(LIBS)
+
+
+
+$(DIR)/texture.o: src/texture.c $(INCS)
+	$(CC) $(OP_CFLAGS) -c -o $@ src/texture.c
+
+$(DIR)/matrix.o: src/matrix.c $(INCS)
+	$(CC) $(OP_CFLAGS) -c -o $@ src/matrix.c 
+
+$(DIR)/vertexbuffer.o: src/vertexbuffer.c $(INCS)
+	$(CC) $(OP_CFLAGS) -c -o $@ src/vertexbuffer.c
+ 
+#$(DIR)/draw.o: src/draw.c $(INCS)
+#$(CC) $(OP_CFLAGS) -c -o $@ src/draw.c 
+
+#$(DIR)/vertexarray.o: src/vertexarray.c $(INCS)
+#$(CC) $(OP_CFLAGS) -c -o $@ src/vertexarray.c
+
+#$(DIR)/vertexelements.o: src/vertexelements.c $(INCS)
+#$(CC) $(OP_CFLAGS) -c -o $@ src/vertexelements.c 
+
+# Implicit rule to build each module of MiniGL (when optimization level is default)
+$(DIR)/%.o : src/%.c $(INCS)
+	$(CC) $(CFLAGS) -c -o $@ $<
+

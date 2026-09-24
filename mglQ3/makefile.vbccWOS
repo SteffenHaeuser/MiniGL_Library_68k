@@ -1,0 +1,104 @@
+#
+# $Id: makefile.vbcc68k,v 1.1.1.1 2000/04/07 19:44:48 tfrieden Exp $
+#
+# $Author: tfrieden $
+#
+# $Date: 2000/04/07 19:44:48 $
+# $Revision: 1.1.1.1 $
+#
+# Makefile for vbcc AmigaOS/68k by Frank Wille
+#
+# (C) 1999 by Hyperion Software
+# All rights reserved
+#
+# This file is part of the MiniGL library project
+# See the file Licence.txt for more details
+#
+#
+#INCLUDE = -Ivincludewos:
+#OF note: for my (OF) PF() and PUTS() macros
+#DEBUG=
+
+# for 68k glquake use -DFIXPOINT
+CFLAGS = -c99 -O2 -speed -cpu=603 -maxoptpasses=30 -merge-constants -DNDEBUG $(INCLUDE)
+//CFLAGS = -c99 $(INCLUDE) $(DEBUG)
+
+#OF added -lauto for gears powerpc.library/GetSysTimePPC() etc.
+#LIBS = -lppcmath -lm -lmgl -lamiga -lauto
+LIBNAME = mglQ3.lib
+DIR = Build.ppc
+EXENAME = GLTestWOS
+EXESRC = src/GLTest.c
+
+#DEMOS = GLTestWOS mtexWOS varrayWOS varray2WOS warpWOS gearsWOS driverinfoWOS gravityWOS rasonlyWOS gears_stats_WOS addtestWOS
+
+#DEMOS = addtestWOS
+
+CC=vc +warpos
+
+AR = join as
+
+LIBOBJ = $(DIR)/context.o $(DIR)/init.o \
+	$(DIR)/fog.o $(DIR)/texture.o \
+	$(DIR)/others.o $(DIR)/matrix.o $(DIR)/vertexbuffer.o \
+	$(DIR)/hclip.o $(DIR)/draw.o $(DIR)/aclip.o $(DIR)/vertexarray.o \
+	$(DIR)/vertexelements.o
+
+all: $(LIBNAME) $(DEMOS)
+
+install:
+	copy include/mgl/#?.h vincludewos:mgl/
+
+#clean:
+#	delete force quiet $(DIR)/#?.o GLtestWOS
+
+lib: $(LIBNAME)
+	@echo "Done"
+
+$(EXENAME): $(EXESRC) $(LIBNAME)
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
+
+# Implicit rule to build each demo (when the name match)
+%WOS : demos/%.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o $@ $< $(LIBS)
+
+driverinfoWOS: demos/driverinfo.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o driverinfoWOS demos/driverinfo.c $(LIBS)
+
+warpWOS: demos/warp.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o warpWOS demos/warp.c $(LIBS)
+
+varrayWOS: demos/varray_new.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o varrayWOS demos/varray_new.c $(LIBS)
+
+varray2WOS: demos/varray.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o varray2WOS demos/varray.c $(LIBS)
+
+gears_stats_WOS: demos/gears_stats.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o gears_statsWOS demos/gears_stats.c $(LIBS)
+
+gearsWOS: demos/gears.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o gearsWOS demos/gears.c $(LIBS)
+
+mtexWOS: demos/mtex.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o mtexWOS demos/mtex.c $(LIBS)
+
+rasonlyWOS: demos/rasonly.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o rasonlyWOS demos/rasonly.c $(LIBS)
+
+gravityWOS: demos/gravity.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o gravityWOS demos/gravity.c $(LIBS)
+
+addtestWOS: demos/addtest.c $(LIBNAME)
+	$(CC) $(CFLAGS) -o addtestWOS demos/addtest.c $(LIBS)
+$(LIBNAME): $(LIBOBJ)
+	$(AR) $(LIBNAME) $(LIBOBJ)
+
+INCS = src/sysinc.h src/vertexarray.h include/mgl/clip.h include/mgl/config.h \
+       include/mgl/context.h include/mgl/gl.h include/mgl/log.h \
+       include/mgl/matrix.h include/mgl/minigl.h include/mgl/vertexbuffer.h
+
+
+# Implicit rule to build each module of MiniGL (when the name match)
+$(DIR)/%.o : src/%.c $(INCS)
+	$(CC) $(CFLAGS) -c -o $@ $<
