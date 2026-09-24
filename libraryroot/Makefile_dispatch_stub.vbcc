@@ -1,0 +1,27 @@
+VC = vc
+VASM = vasmm68k_mot
+OBJDIR = obj_vbcc_dispatch_stub
+EXOBJDIR = obj_vbcc_examples_dispatch_stub
+BINDIR = bin/dispatch-stub-vbcc
+CFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -Iinclude -Ilibrary -IInclude: -D__M68K__ -DMINIGL_VBCC_LIBRARY -DMINIGL_BACKEND_STUB -DMINIGL_LIBRARY_BUILD
+EXCFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -Iinclude -IInclude:
+all:
+	-makedir $(OBJDIR)
+	-makedir bin
+	-makedir $(BINDIR)
+	$(VC) $(CFLAGS) -c library/minigl_library.c -o $(OBJDIR)/minigl_library.o
+	$(VC) $(CFLAGS) -c library/dispatch_table_stub.c -o $(OBJDIR)/dispatch_table_stub.o
+	$(VC) $(CFLAGS) -c library/context_state_stub.c -o $(OBJDIR)/context_state_stub.o
+	$(VC) $(CFLAGS) -c library/debug_output.c -o $(OBJDIR)/debug_output.o
+	$(VC) +aos68k -nostdlib -resident -o $(BINDIR)/minigl.library $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_stub.o $(OBJDIR)/context_state_stub.o $(OBJDIR)/debug_output.o
+testprograms:
+	-makedir $(EXOBJDIR)
+	$(VC) $(EXCFLAGS) -c client/minigl_base.c -o $(EXOBJDIR)/minigl_base.o
+	$(VC) $(EXCFLAGS) -c client/minigl_open.c -o $(EXOBJDIR)/minigl_open.o
+	$(VASM) -Fhunk -m68040 -o $(EXOBJDIR)/minigl_dispatch_stub.o client/minigl_dispatch_stub_vbcc.s
+	$(VC) $(EXCFLAGS) examples/library_test.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -o $(BINDIR)/library_test
+	$(VC) $(EXCFLAGS) examples/milestone_gears_stats_library.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -lmieee -o $(BINDIR)/milestone_gears_library
+clean:
+	-delete $(OBJDIR) ALL QUIET
+	-delete $(EXOBJDIR) ALL QUIET
+	-delete $(BINDIR) ALL QUIET

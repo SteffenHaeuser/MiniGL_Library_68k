@@ -1,0 +1,29 @@
+VC = vc
+VASM = vasmm68k_mot
+OBJDIR = obj_vbcc_dispatch_classic
+EXOBJDIR = obj_vbcc_examples_dispatch_classic
+BINDIR = bin/dispatch-classic-vbcc
+CLASSIC_INC = third_party/classic/include
+CLASSIC_LIB = third_party/classic/mgl.lib
+CFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -I$(CLASSIC_INC) -Iinclude -Ilibrary -IInclude: -D__M68K__ -DMINIGL_VBCC_LIBRARY -DMINIGL_BACKEND_CLASSIC -DMINIGL_LIBRARY_BUILD
+EXCFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -Iinclude -IInclude:
+all:
+	-makedir $(OBJDIR)
+	-makedir bin
+	-makedir $(BINDIR)
+	$(VC) $(CFLAGS) -c library/minigl_library.c -o $(OBJDIR)/minigl_library.o
+	$(VC) $(CFLAGS) -c library/dispatch_table_classic.c -o $(OBJDIR)/dispatch_table_classic.o
+	$(VC) $(CFLAGS) -c library/debug_output.c -o $(OBJDIR)/debug_output.o
+	$(VC) $(CFLAGS) -c library/runtime_shim.c -o $(OBJDIR)/runtime_shim.o
+	$(VC) +aos68k -nostdlib -resident -o $(BINDIR)/minigl.library $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_classic.o $(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(CLASSIC_LIB)
+testprograms:
+	-makedir $(EXOBJDIR)
+	$(VC) $(EXCFLAGS) -c client/minigl_base.c -o $(EXOBJDIR)/minigl_base.o
+	$(VC) $(EXCFLAGS) -c client/minigl_open.c -o $(EXOBJDIR)/minigl_open.o
+	$(VASM) -Fhunk -m68040 -o $(EXOBJDIR)/minigl_dispatch_stub.o client/minigl_dispatch_stub_vbcc.s
+	$(VC) $(EXCFLAGS) examples/library_test.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -o $(BINDIR)/library_test
+	$(VC) $(EXCFLAGS) examples/milestone_gears_stats_library.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -lmieee -o $(BINDIR)/milestone_gears_library
+clean:
+	-delete $(OBJDIR) ALL QUIET
+	-delete $(EXOBJDIR) ALL QUIET
+	-delete $(BINDIR) ALL QUIET

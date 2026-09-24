@@ -1,0 +1,64 @@
+# V25: RC9 SDK with the user's separate FPU mode-change-fixed cc1/cc1plus.
+# Do not silently fall back to unpatched RC9 or reuse the Bernie objects.
+CROSS ?= /opt/amiga-gcc16-rc9/bin/m68k-amigaos-
+MODEFIX ?= /home/arczi/toolchains/amiga-gcc16-modefix
+ifeq ($(wildcard $(MODEFIX)/cc1),)
+$(error Missing FPU-fixed compiler: $(MODEFIX)/cc1)
+endif
+CC := $(CROSS)gcc -B$(MODEFIX)/
+VARIANT ?= stock
+FAST_MATH ?= 0
+ifeq ($(FAST_MATH),0)
+MATH_FLAGS := -fno-fast-math
+MATH_SUFFIX := -nofastmath
+else ifeq ($(FAST_MATH),1)
+MATH_FLAGS := -ffast-math
+MATH_SUFFIX :=
+else
+$(error FAST_MATH must be 0 or 1)
+endif
+OBJ := obj_verified_rc9_modefix_060$(MATH_SUFFIX)/$(VARIANT)
+OUT := bin/verified-rc9-modefix-060$(MATH_SUFFIX)/$(VARIANT)
+Q3 := ../../mglQ3
+FLAGS := -std=c99 -m68060 -mhard-float -mcrt=clib2 -O3 $(MATH_FLAGS) \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow -fsigned-char \
+ -fno-baserel -fno-builtin -D__M68K__ -Wall -Wextra -g
+ifeq ($(VARIANT),ortho)
+FLAGS += -DMINIGL_CLASSIC_ORTHO
+else ifneq ($(VARIANT),stock)
+$(error VARIANT must be stock or ortho)
+endif
+INC := -I$(Q3)/include -Iinclude -Ilibrary
+Q3_NAMES := context vertexbuffer draw texture fog hclip init glu aclip vertexelements vertexarray others matrix
+LIB_NAMES := minigl_library dispatch_table_classic debug_output runtime_shim math_shim
+Q3_OBJS := $(addprefix $(OBJ)/q3/,$(addsuffix .o,$(Q3_NAMES)))
+LIB_OBJS := $(addprefix $(OBJ)/library/,$(addsuffix .o,$(LIB_NAMES)))
+.PHONY: all variants checks
+all: $(OUT)/minigl.library
+variants:
+	$(MAKE) -f Makefile_classic_verified.gcc VARIANT=stock all checks
+	$(MAKE) -f Makefile_classic_verified.gcc VARIANT=ortho all checks
+$(OBJ)/q3/%.o: $(Q3)/src/%.c Makefile_classic_verified.gcc
+	@mkdir -p $(@D)
+	$(CC) $(FLAGS) $(INC) -MMD -MP -c $< -o $@
+$(OBJ)/library/%.o: library/%.c Makefile_classic_verified.gcc
+	@mkdir -p $(@D)
+	$(CC) $(FLAGS) $(INC) -DMINIGL_BACKEND_CLASSIC -DMINIGL_LIBRARY_BUILD -MMD -MP -c $< -o $@
+$(OUT)/minigl.library: $(LIB_OBJS) $(Q3_OBJS)
+	@mkdir -p $(@D)
+	$(CC) -m68060 -mhard-float -nostdlib -nostartfiles -nodefaultlibs -noixemul \
+	 -Wl,-Map,$@.map -o $@.debug -Wl,--start-group $(LIB_OBJS) $(Q3_OBJS) -lm -lgcc -Wl,--end-group
+	$(CROSS)strip -o $@ $@.debug
+TESTFLAGS := -std=c99 -m68060 -mhard-float -mcrt=nix20 -O3 $(MATH_FLAGS) \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-builtin
+checks: $(OUT)/test-warp3d-vector $(OUT)/test-ortho $(OUT)/test-dispatch-abi
+$(OUT)/test-warp3d-vector: tests/test_warp3d_vector.c tests/test_warp3d_vector.s $(Q3)/include/inline/Warp3D.h Makefile_classic_verified.gcc
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) $(INC) $(filter %.c %.s,$^) -o $@
+$(OUT)/test-ortho: tests/test_ortho.c $(Q3)/src/transform_ortho.h Makefile_classic_verified.gcc
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) $< -lm -o $@
+$(OUT)/test-dispatch-abi: tests/test_dispatch_abi.c include/libraries/minigl_dispatch.h Makefile_classic_verified.gcc
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) $(INC) $< -o $@
+-include $(LIB_OBJS:.o=.d) $(Q3_OBJS:.o=.d)

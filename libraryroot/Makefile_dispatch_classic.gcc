@@ -1,0 +1,44 @@
+CC := m68k-amigaos-gcc
+AR := m68k-amigaos-ar
+RANLIB := m68k-amigaos-ranlib
+CPU ?= 68040
+OBJDIR ?= obj_gcc_dispatch_classic
+EXOBJDIR ?= obj_gcc_examples_dispatch
+OUTDIR ?= bin/dispatch-classic-gcc
+BINDIR ?= bin
+CLASSIC_SRC ?= ../../mglQ3
+CLASSIC_INC ?= $(CLASSIC_SRC)/include
+Q3_OBJDIR ?= obj_gcc
+Q3_LIB ?= $(CLASSIC_SRC)/lib/libmgl-q3.a
+CLASSIC_LIB ?= $(Q3_LIB)
+COMMON_CFLAGS = -mcpu=$(CPU) -mhard-float -ffast-math -O2 -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow -fsigned-char -noixemul
+LIB_CFLAGS = $(COMMON_CFLAGS) -I$(CLASSIC_INC) -Iinclude -Ilibrary -D__M68K__ -DMINIGL_BACKEND_CLASSIC -DMINIGL_LIBRARY_BUILD -fno-baserel -fno-builtin -Wall -Wextra
+EX_CFLAGS = $(COMMON_CFLAGS) -fno-builtin -I$(CLASSIC_INC) -Iinclude
+LIB_OBJS = $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_classic.o $(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(OBJDIR)/math_shim.o
+CLIENT_OBJS = $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub_gcc.o
+IMPORTLIB = lib/libminigl_dispatch.a
+.PHONY: all clean importlib testprograms classic_backend
+all: $(OUTDIR)/minigl.library
+classic_backend:
+	$(MAKE) -C $(CLASSIC_SRC) CC=$(CC) AR=$(AR) RANLIB=$(RANLIB) CPU=$(CPU) OBJDIR=$(Q3_OBJDIR) LIBNAME=lib/libmgl-q3.a
+$(OBJDIR) $(EXOBJDIR) $(OUTDIR) $(BINDIR) lib:
+	mkdir -p $@
+$(OBJDIR)/%.o: library/%.c | $(OBJDIR)
+	$(CC) $(LIB_CFLAGS) -c $< -o $@
+$(OUTDIR)/minigl.library: classic_backend $(LIB_OBJS) | $(OUTDIR)
+	$(CC) -nostdlib -nostartfiles -nodefaultlibs -noixemul -o $@ -Wl,--start-group $(LIB_OBJS) $(CLASSIC_LIB) -lm -lgcc -Wl,--end-group
+$(EXOBJDIR)/minigl_base.o: client/minigl_base.c | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_open.o: client/minigl_open.c | $(EXOBJDIR)
+	$(CC) $(EX_CFLAGS) -c $< -o $@
+$(EXOBJDIR)/minigl_dispatch_stub_gcc.o: client/minigl_dispatch_stub_gcc.s | $(EXOBJDIR)
+	$(CC) -mcpu=$(CPU) -c $< -o $@
+importlib: $(IMPORTLIB)
+$(IMPORTLIB): $(CLIENT_OBJS) | lib
+	$(AR) rcs $@ $(CLIENT_OBJS)
+testprograms: importlib | $(BINDIR)
+	$(CC) $(EX_CFLAGS) examples/library_test.c $(IMPORTLIB) -o $(BINDIR)/library_test_dispatch_gcc
+	$(CC) $(EX_CFLAGS) examples/milestone_gears_stats_library.c $(IMPORTLIB) -lm -o $(BINDIR)/milestone_gears_dispatch_gcc
+clean:
+	rm -rf $(OBJDIR) $(EXOBJDIR) $(OUTDIR)
+	rm -f $(IMPORTLIB) $(BINDIR)/*_dispatch_gcc

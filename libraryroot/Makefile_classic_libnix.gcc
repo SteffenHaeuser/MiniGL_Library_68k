@@ -1,0 +1,22 @@
+# Isolated libnix SDK variant of the user's full-fast-math build.
+# Build stock and ortho separately with VARIANT=stock / VARIANT=ortho.
+FAST_MATH := 1
+override MATH_SUFFIX := -libnix-userflags
+include Makefile_classic_verified.gcc
+
+# Also select nix20 when linking libm/libgcc; retain the resident library's
+# freestanding runtime (no application startup or full libc).
+CC := $(CROSS)gcc -B$(MODEFIX)/ -mcrt=nix20
+FLAGS := -std=c99 -m68060 -mhard-float -mcrt=nix20 -O3 -ffast-math \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow -fsigned-char \
+ -D__M68K__ -g
+ifeq ($(VARIANT),ortho)
+FLAGS += -DMINIGL_CLASSIC_ORTHO
+endif
+
+$(OBJ)/library/debug_output.o $(OBJ)/library/runtime_shim.o: FLAGS += -fno-builtin
+$(LIB_OBJS) $(Q3_OBJS): Makefile_classic_libnix.gcc
+
+variants:
+	$(MAKE) -f Makefile_classic_libnix.gcc VARIANT=stock all
+	$(MAKE) -f Makefile_classic_libnix.gcc VARIANT=ortho all

@@ -1,0 +1,35 @@
+VC = vc
+VASM = vasmm68k_mot
+OBJDIR = obj_vbcc_dispatch
+EXOBJDIR = obj_vbcc_examples_dispatch
+BINDIR = bin/dispatch-pistorm3d-vbcc
+PISTORM3D_INC = third_party/pistorm3d/gl/include
+PISTORM3D_LIB = third_party/pistorm3d/miniglv3d.lib
+CFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -Iinclude -Ilibrary -I$(PISTORM3D_INC) -IInclude: -D__M68K__ -DMINIGL_VBCC_LIBRARY -DPISTORM3D -DMINIGL_BACKEND_PISTORM3D -DMINIGL_LIBRARY_BUILD
+EXCFLAGS = +aos68k -c99 -O=991 -cpu=68040 -fpu=68881 -Iinclude -IInclude:
+all:
+	-makedir $(OBJDIR)
+	-makedir bin
+	-makedir $(BINDIR)
+	$(VC) $(CFLAGS) -c library/minigl_library.c -o $(OBJDIR)/minigl_library.o
+	$(VC) $(CFLAGS) -c library/dispatch_table_pistorm3d.c -o $(OBJDIR)/dispatch_table_pistorm3d.o
+	$(VC) $(CFLAGS) -c library/debug_output.c -o $(OBJDIR)/debug_output.o
+	$(VC) $(CFLAGS) -c library/runtime_shim.c -o $(OBJDIR)/runtime_shim.o
+	$(VC) $(CFLAGS) -c library/pistorm3d_stubs.c -o $(OBJDIR)/pistorm3d_stubs.o
+	$(VASM) -Fhunk -m68040 -o $(OBJDIR)/pistorm3d_stdio_stubs.o library/pistorm3d_stdio_stubs.s
+	$(VC) +aos68k -nostdlib -resident -o $(BINDIR)/minigl.library $(OBJDIR)/minigl_library.o $(OBJDIR)/dispatch_table_pistorm3d.o $(OBJDIR)/debug_output.o $(OBJDIR)/runtime_shim.o $(OBJDIR)/pistorm3d_stubs.o $(OBJDIR)/pistorm3d_stdio_stubs.o third_party/pistorm3d/lshint64.o third_party/pistorm3d/rshsint64.o third_party/pistorm3d/rshuint64.o third_party/pistorm3d/memcmp.o $(PISTORM3D_LIB)
+testprograms:
+	-makedir $(EXOBJDIR)
+	-makedir bin
+	-makedir $(BINDIR)
+	$(VC) $(EXCFLAGS) -c client/minigl_base.c -o $(EXOBJDIR)/minigl_base.o
+	$(VC) $(EXCFLAGS) -c client/minigl_open.c -o $(EXOBJDIR)/minigl_open.o
+	$(VASM) -Fhunk -m68040 -o $(EXOBJDIR)/minigl_dispatch_stub.o client/minigl_dispatch_stub_vbcc.s
+	$(VC) $(EXCFLAGS) examples/library_test.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -o $(BINDIR)/library_test
+	$(VC) $(EXCFLAGS) examples/milestone_ballonly_library.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -lmieee -o $(BINDIR)/milestone_ballonly_library
+	$(VC) $(EXCFLAGS) examples/milestone_bounce_interactive_library.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -lmieee -o $(BINDIR)/milestone_bounce_interactive_library
+	$(VC) $(EXCFLAGS) examples/milestone_gears_stats_library.c $(EXOBJDIR)/minigl_base.o $(EXOBJDIR)/minigl_open.o $(EXOBJDIR)/minigl_dispatch_stub.o -lmieee -o $(BINDIR)/milestone_gears_library
+clean:
+	-delete $(OBJDIR) ALL QUIET
+	-delete $(EXOBJDIR) ALL QUIET
+	-delete $(BINDIR) ALL QUIET
