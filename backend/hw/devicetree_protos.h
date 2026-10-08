@@ -11,7 +11,12 @@
 
 #include "lvocall_compat.h"
 
-MGLV3D_LP1(APTR, __DT_OpenKey, 6, CONST_STRPTR, a0)
+/* The two key/property name parameters are `const char*` here, not the
+ * original's CONST_STRPTR: every caller passes a string literal, and STRPTR is
+ * unsigned char*, so each call was a -Wpointer-sign warning. The LVO call puts
+ * the same pointer in the same register either way, so this is type checking
+ * only -- and it keeps it, where casting at the call sites would not. */
+MGLV3D_LP1(APTR, __DT_OpenKey, 6, const char*, a0)
 #define DT_OpenKey(name) __DT_OpenKey(DeviceTreeBase, (name))
 
 MGLV3D_LP1NR(__DT_CloseKey, 12, APTR, a0)
@@ -20,7 +25,7 @@ MGLV3D_LP1NR(__DT_CloseKey, 12, APTR, a0)
 MGLV3D_LP2(APTR, __DT_GetChild, 18, APTR, a0, APTR, a1)
 #define DT_GetChild(key, prev) __DT_GetChild(DeviceTreeBase, (key), (prev))
 
-MGLV3D_LP2(APTR, __DT_FindProperty, 24, APTR, a0, CONST_STRPTR, a1)
+MGLV3D_LP2(APTR, __DT_FindProperty, 24, APTR, a0, const char*, a1)
 #define DT_FindProperty(key, property) __DT_FindProperty(DeviceTreeBase, (key), (property))
 
 MGLV3D_LP2(APTR, __DT_GetProperty, 30, APTR, a0, APTR, a1)

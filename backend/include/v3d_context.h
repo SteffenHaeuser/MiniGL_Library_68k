@@ -11,16 +11,16 @@
 #include "v3d_device.h"
 
 /*
- * V3DContext -- replaces W3D_Context / RPIV3D_Context
- * (PoC/v3d_structs.h:127-162), which embedded "W3D_Context w3d" as its
- * first member; V3DContext drops that embedding. The render-state fields
- * below (zmode/blend/alpha test/fixedcolor) are carried over from
- * RPIV3D_Context, since that state is backend-owned, not Warp3D-shaped --
+ * V3DContext -- replaces W3D_Context and the context struct of
+ * an earlier library by the same author, which embedded "W3D_Context w3d" as
+ * its first member; V3DContext drops that embedding. The render-state fields
+ * below (zmode/blend/alpha test/fixedcolor) are carried over from that
+ * struct, since that state is backend-owned, not Warp3D-shaped --
  * only the container changed.
  *
- * The control-list buffers are persistent fields here; the PoC allocated
- * its buffers locally, per call, inside CL_Draw_Triangle (v3d_cle.c:604-609,
- * `v3d_static_buffer abuffer[3]`).
+ * The control-list buffers are persistent fields here; the earlier library
+ * allocated its buffers locally, per call, inside CL_Draw_Triangle
+ * (`v3d_static_buffer abuffer[3]`).
  *
  * `frame` is embedded directly (not a pointer to a separately-allocated
  * struct): a context has one frame in flight at a time (there is no job
@@ -154,7 +154,7 @@ struct V3DContext {
      * that distinction is called out explicitly on this platform. */
     int     zbuffer_bits;
 
-    /* persistent GPU memory pools -- sized once at context-create/resize, not per draw call like PoC's CL_Draw_Triangle did */
+    /* persistent GPU memory pools -- sized once at context-create/resize, not per draw call like the earlier library's CL_Draw_Triangle did */
     v3d_mem zbuffer_mem;
     v3d_mem tile_state_mem;
     v3d_mem tile_alloc_mem;
@@ -165,8 +165,8 @@ struct V3DContext {
      * doesn't need to change what the rest of the code touches (the v3d_static_buffer).
      *
      * state_buf holds shader state and attribute records, uniforms and texture/sampler state --
-     * what PoC's `scl` (state control list, the 4th of CL_Draw_Triangle's 4x4KB chunks,
-     * v3d_cle.c) held -- plus each draw's vertex and index arrays (gl_EmitPrimitiveV3D). */
+     * what the earlier library's `scl` (state control list, the 4th of CL_Draw_Triangle's
+     * 4x4KB chunks) held -- plus each draw's vertex and index arrays (gl_EmitPrimitiveV3D). */
     /* Each of these 4 is a 2-element array, indexed by build_slot below;
      * gl_FramePresent alternates build_slot after every submitted pass.
      * They are the only 4 things the CPU directly writes bytes into during
@@ -182,7 +182,7 @@ struct V3DContext {
     v3d_static_buffer render_buf[2];
     v3d_static_buffer tile_list_buf[2];
     v3d_static_buffer state_buf[2];
-    v3d_static_buffer* current_buf;   /* points at whichever of the above is being written -- same pattern as PoC's SetBuffer()/context->currentBuf */
+    v3d_static_buffer* current_buf;   /* points at whichever of the above is being written -- same pattern as the earlier library's SetBuffer()/context->currentBuf */
     v3d_u8 build_slot;   /* which slot [0]/[1] the CPU is currently building into */
 
     /* A SINGLE render-completion flag, not per-CL-slot -- only one bitmap

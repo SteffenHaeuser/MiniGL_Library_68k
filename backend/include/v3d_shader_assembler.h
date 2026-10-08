@@ -16,13 +16,20 @@
  */
 
 /*
- * Not a hardware ceiling -- purely this project's own buffer-sizing
- * choice, matched to the 1024-byte code slot gl_EnsureShaders (draw.c)
- * gives each variant (1024 bytes / 8 bytes-per-instruction = 128). A
- * longer shader fails to assemble ("ran out of space"), so
- * v3d_assemble_builtin_shaders returns FALSE.
+ * Not a hardware ceiling and not a layout constraint -- purely the host buffer
+ * each variant assembles into. There is no GPU-side limit: gl_EnsureShaders
+ * (draw.c) lays the shaders end to end and records each offset in
+ * g_shader_offset, so a longer shader simply takes more bytes and the next one
+ * starts after it. A shader past this cap fails to assemble ("ran out of
+ * space") and v3d_assemble_builtin_shaders returns FALSE -- loudly, at init,
+ * caught by shader_assembler_test.
+ *
+ * One capacity for every variant. Splitting it -- 128 with a separate 256-entry
+ * buffer for the one shader that needs more -- buys nothing but a special case
+ * at every use, so the one capacity costs 70 * 256 * 8 = 143,360 bytes here
+ * instead of 71,680, and the lit shaders have room to unroll per light.
  */
-#define V3D_SHADER_MAX_INSTRUCTIONS 128
+#define V3D_SHADER_MAX_INSTRUCTIONS 256
 
 typedef struct V3DAssembledShader {
     v3d_qpu_instruction instructions[V3D_SHADER_MAX_INSTRUCTIONS]; /* packed 64-bit QPU machine code, ready for byteswap64 + upload */
@@ -32,7 +39,7 @@ typedef struct V3DAssembledShader {
 /*
  * Named slots into v3d_shader_variants[]. The 3 base shaders
  * (fragment/vertex/coordinate, textured; derived from the mnemonics in
- * PoC/v3d_shaders.c) come first.
+ * an earlier library by the same author) come first.
  *
  * V3D_MAX_SHADER_VARIANTS IS A PRECISE COUNT, NOT HEADROOM -- the enum is
  * exactly full.
@@ -40,10 +47,9 @@ typedef struct V3DAssembledShader {
  * ADDING A VARIANT REQUIRES THESE EDITS IN LOCKSTEP:
  *   1. the new enum entry.
  *   2. V3D_MAX_SHADER_VARIANTS below (it sizes v3d_shader_variants[]).
- *   3. the 114 * 1024 literal passed to v3d_mem_alloc in gl/src/draw.c's
- *      gl_EnsureShaders -- the slot buffer is likewise exactly full, the
- *      last slot ending precisely at the end of the allocation, so a new
- *      slot without this bump writes past the end of shader_code_mem.
+ *   3. nothing, for the allocation. gl_EnsureShaders sums the variants'
+ *      real sizes and allocates exactly that, so the buffer grows with the
+ *      new variant on its own. No literal total needs bumping.
  *   4. the parallel lists in gl_EnsureShaders (pointer declarations,
  *      shader_vex + OFFSET assignment, &v3d_shader_variants[] binding, and
  *      the byteswap64 upload loop).
@@ -52,13 +58,12 @@ typedef struct V3DAssembledShader {
  *      stays all-zero.
  * Nothing enforces any of this at compile time; it is maintained by hand.
  *
- * Slot stride is 1024 bytes = V3D_SHADER_MAX_INSTRUCTIONS (128) * 8, on
- * purpose -- raising the instruction cap without raising draw.c's stride
- * would let a long shader overwrite the NEXT variant's slot silently.
+ * THERE IS NO SLOT STRIDE. The shaders are packed end to end and each one's
+ * byte offset is recorded in draw.c's g_shader_offset, so a long shader cannot
+ * reach the next variant's code.
  */
 enum {
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED = 0,
-    V3D_SHADER_VARIANT_VERTEX_TEXTURED,
+    V3D_SHADER_VARIANT_VERTEX_TEXTURED = 0,
     V3D_SHADER_VARIANT_COORDINATE_TEXTURED,
     V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED,
     V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG,
@@ -120,43 +125,6 @@ enum {
      * draw.c selects none of the software-blend (ldtlb) variants in this
      * enum, their _FOG forms included: a blended draw uses the plain
      * shader for its shape plus the hardware blend. */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND,
-
-    /* A second software-blend variant, additive (GL_ONE/GL_ONE) instead
-     * of the LERP above -- see v3d_assembler.c's comment on
-     * g_fragment_shader_untextured_blend_add_assembly. Fragment-only,
-     * reuses VERTEX_TEXTURED/COORDINATE_TEXTURED unchanged, same as the
-     * LERP variant above. */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD,
-
-    /* Smooth-capable additive blend -- see v3d_assembler.c's comment on
-     * g_fragment_shader_untextured_smooth_blend_add_assembly. Takes a
-     * different color per vertex, not the single flat color the plain
-     * additive variant above handles. Fragment-only, reuses VERTEX_SMOOTH
-     * unchanged (same varying layout the smooth-untextured fragment
-     * shader consumes). */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD,
-
-    /* Smooth-capable LERP (SRC_ALPHA/ONE_MINUS_SRC_ALPHA) blend -- see
-     * v3d_assembler.c's comment on
-     * g_fragment_shader_untextured_smooth_blend_assembly. Takes a
-     * different color per vertex, which the flat/uniform-color LERP
-     * variant can't handle. Fragment-only, reuses VERTEX_SMOOTH
-     * unchanged. */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND,
-
-    /* TEXTURED software blend -- none of the untextured swblend variants
-     * above can sample a texture at all. See v3d_assembler.c's comment
-     * on g_fragment_shader_textured_blend_assembly. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND,
-
-    /* The one three-way combination (textured + SMOOTH + blend) none of
-     * the variants above cover -- each requires either !textured or
-     * !smooth. See v3d_assembler.c's comment on
-     * g_fragment_shader_textured_smooth_blend_assembly -- reuses the
-     * smooth+textured shader's per-vertex modulation feeding directly
-     * into FRAGMENT_TEXTURED_BLEND's ldtlb LERP math. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND,
 
     /* Variants that read a REAL per-vertex w instead of a hardcoded
      * w=1.0: selected for clip-space (Sutherland-Hodgeman-generated)
@@ -188,9 +156,6 @@ enum {
      * combination, since only the fragment stage differs between them. */
     V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL,
     V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND,
 
     /* GL_GREATER alpha test. Same discard mechanism as the GEQUAL pair,
      * just the fcmp operand order swapped and the setmsf condition
@@ -209,7 +174,6 @@ enum {
      * shader's instruction COUNT/timing exactly but not its CONTENT. See
      * v3d_assembler.c's comment on
      * g_fragment_shader_padded_flat_test_assembly. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_PADDED_FLAT_TEST,
 
     /* Multitextured + SRC_ALPHA/INV_SRC_ALPHA translucency blend,
      * GL_MODULATE combine only. A direct splice of two existing pieces,
@@ -223,7 +187,6 @@ enum {
      *      uniform read + ldtlb dest-read + SRC_ALPHA/INV_SRC_ALPHA LERP +
      *      writeback, taken verbatim from the point where IT has rf7-rf10
      *      in the exact same blue/green/red/alpha shape. */
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT,
 
     /* The plain textured+flat case (not smooth, not multitextured, no
      * fog/alphatest): multiplies the texture sample by glColor's flat
@@ -236,33 +199,14 @@ enum {
      * comment on g_fragment_shader_textured_colormod_assembly. */
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD,
 
-    /* Textured + smooth + GL_ONE/GL_ONE additive -- see v3d_assembler.c's
-     * comment on g_fragment_shader_textured_smooth_blend_add_assembly
-     * for the full derivation. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD,
-
-    /* 4 textured+smooth+!multitextured software-blend variants for
-     * src=DSTCOLOR, one per dst factor (ZERO, ONE, SRCCOLOR,
-     * INVDSTALPHA). None of the swblend-family shaders above cover any
-     * DSTCOLOR-sourced blend. Each reuses VERTEX_SMOOTH_TEXTURED
-     * unchanged (same front-section/varying layout as
-     * FRAGMENT_TEXTURED_SMOOTH_BLEND -- see v3d_assembler.c's comments on
-     * these 4 shaders for the exact splice). */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA,
-
     /* src=ZERO, dst=INVSRCCOLOR (result = Cd*(1-Cs)),
      * textured+smooth+!multitextured. Same splice technique, same
      * VERTEX_SMOOTH_TEXTURED reuse as the DSTCOLOR family above. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR,
 
     /* src=DSTCOLOR, dst=SRCALPHA (result = Cd*(Cs+Cs.a)) -- the DSTCOLOR
      * family, with a dst factor not covered by the 4 above,
      * textured+smooth+!multitextured. Same splice technique, same
      * VERTEX_SMOOTH_TEXTURED reuse. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA,
 
     /* Two more factor pairs, src=ONE and src=INVSRCALPHA:
      *   ONE_INVSRCALPHA:      src=ONE,         dst=INVSRCALPHA
@@ -271,8 +215,6 @@ enum {
      *                         result = Cs*(1-Cs.a) + Cd*Cs.a
      * Same splice technique, same VERTEX_SMOOTH_TEXTURED reuse as the
      * rest of this family. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA,
 
     /* GL_ALPHA_TEST (GL_GREATER) combined with GL_SMOOTH shading,
      * textured -- see v3d_assembler.c's comment on
@@ -283,19 +225,6 @@ enum {
 
     /* Same shape, GL_GEQUAL. */
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST,
-
-    /* GL_SRC_ALPHA/GL_ONE (alpha-weighted additive) software blend, which
-     * none of the variants above cover (every SRCALPHA-source variant
-     * pairs with INVSRCALPHA, never ONE). Same
-     * splice technique as the rest of this family -- see
-     * v3d_assembler.c's comments on these 3 shaders for the exact
-     * derivation (LERP shader's src*alpha multiply + additive shader's
-     * dst-add-and-clamp tail, no invAlpha term since dst factor is ONE
-     * not 1-alpha). Mirrors the ONE/ONE "add" family's exact 3-shape
-     * scope (flat, smooth, textured+smooth). */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE,
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE,
 
     /*
      * REMAINING alpha_func VARIANTS: GL_NEVER, GL_LESS, GL_EQUAL, GL_LEQUAL
@@ -392,12 +321,8 @@ enum {
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_NEVER,
 
     /* Smooth fog, slots 76..84. Nine variants: untextured, textured, and
-     * textured with each of the seven alpha compare functions. There is
-     * no untextured smooth alphatest entry because no such shader exists
-     * anywhere -- alpha test on an untextured smooth draw matches neither
-     * the `alphatest` predicate (needs !smooth) nor `smooth_alphatest`
-     * (needs textured), so alpha test is not applied to an untextured
-     * smooth draw -- a known gap. */
+     * textured with each of the seven alpha compare functions. The untextured
+     * smooth alphatest variants are the group at the end of this enum. */
     V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG,
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG,
 
@@ -418,41 +343,32 @@ enum {
     V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_FOG,
     V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_FOG,
 
-    /* Software-blend fog, slots 88..101. Fog goes in BEFORE the first
+    /* THE TWO LIT VERTEX SHADERS, code slots 64 and 65. They are VERTEX
+     * shaders declared among the fragment ones, which is placement and nothing
+     * more: a code slot is type-agnostic, because draw.c holds the fragment
+     * and vertex code addresses as two independent fields, so a reclaimed
+     * fragment slot hosts a vertex shader perfectly well.
+     *
+     * They occupy RECLAIMED slots rather than appended ones, and that
+     * is the whole trick: the enum count stays 114, so
+     * V3D_MAX_SHADER_VARIANTS below never moves and not one offset
+     * literal in the 193-literal dispatch chain is renumbered. See the
+     * derivation comment on the arrays themselves in v3d_assembler.c. */
+    V3D_SHADER_VARIANT_VERTEX_LIT,
+    V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED,
+    /* Software-blend fog, slots 90..101. Fog goes in BEFORE the first
      * ldtlb in these -- GL applies fog to the fragment and blends
      * afterwards, so fogging the blended result would fog the destination's
      * contribution too. Only the variants whose blend math leaves rf11-rf19
      * alone and finishes the source colour before the first ldtlb are here;
      * the other eight need different scratch registers and are in the next
      * two groups. */
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND_FOG,
 
     /* Register-constrained blend fog, slots 102..106. These five use
      * rf11-rf19 for their own blend math, so each carries a fog block on
      * registers allocated from its own unused set instead of the shared one. */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG,
 
     /* Untextured flat blend fog, slots 107..109. */
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD_FOG,
-    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE_FOG,
 
     /* Smooth points, slots 110..113: GL_POINT_SMOOTH for the four
      * base shapes (untextured/textured x flat/smooth colour). They read the
@@ -463,7 +379,57 @@ enum {
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_POINT_SMOOTH,
     V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_POINT_SMOOTH,
 
-    V3D_MAX_SHADER_VARIANTS = 114
+    /* Untextured smooth alpha test: seven compare functions without fog, then
+     * seven with. They are what lets `lit` cover alpha test -- a lit
+     * draw's fragment stage is smooth, so an untextured lit draw with the alpha
+     * test on would otherwise have no shader to reach. */
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_GREATER,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LESS,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_EQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LEQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NOTEQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NEVER,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_GREATER,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LESS,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_EQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LEQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NOTEQUAL,
+    V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NEVER,
+
+    /* Lit with a REAL per-vertex w. The lit twin of
+     * VERTEX_SMOOTH_TEXTURED_CLIPSPACE, derived from VERTEX_LIT_TEXTURED by
+     * reading w from the VPM and shifting every later input index by one.
+     * Appended, so no existing ordinal moves. */
+    V3D_SHADER_VARIANT_VERTEX_LIT_REALW,
+
+    /* Lit MULTITEXTURE, both stages. The vertex shader is VERTEX_LIT_TEXTURED
+     * plus unit 1's texcoord pair; the fragment shader is
+     * FRAGMENT_MULTITEXTURE plus the lit colour as four varyings, which that
+     * path has no input for at all. MODULATE only: decal and the fogged
+     * combines need their own and have none. */
+    V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE,
+    V3D_SHADER_VARIANT_FRAGMENT_LIT_MULTITEXTURE,
+
+    /* GL_COLOR_MATERIAL: one twin per lit vertex shape. The colour
+     * attribute record comes back and each term gains its K1 half.
+     * No fragment twin -- the lit colour already arrives as varyings. */
+    V3D_SHADER_VARIANT_VERTEX_LIT_COLORMATERIAL,
+    V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED_COLORMATERIAL,
+    V3D_SHADER_VARIANT_VERTEX_LIT_REALW_COLORMATERIAL,
+    V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE_COLORMATERIAL,
+
+    /* GL_BLEND and GL_ADD on unit 0, for the two base textured shapes.
+     * The other modes need no shader: GL_MODULATE is the combine these
+     * hosts already compute, and REPLACE and DECAL are faked by feeding
+     * white as the primary colour (draw.c, replace_white). */
+    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVADD,
+    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVBLEND,
+    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVADD,
+    V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVBLEND,
+
+    V3D_MAX_SHADER_VARIANTS = 95
 };
 
 /*
@@ -481,8 +447,51 @@ extern V3DAssembledShader v3d_shader_variants[V3D_MAX_SHADER_VARIANTS];
  * Assembles the built-in shaders via the ported QPU assembler, into
  * v3d_shader_variants[]. Returns TRUE on success, FALSE if any shader
  * fails to assemble/pack/validate (details go to D()/kprintf, matching
- * PoC's own v3d_assemble() error reporting).
+ * the earlier library's own v3d_assemble() error reporting).
  */
 int v3d_assemble_builtin_shaders(V3DDevice* device);
+
+/*
+ * TEST-ONLY, AND NOT IN THE DRIVER. Everything below exists for
+ * shader_assembler_test and is compiled only when MGLV3D_ASSEMBLE_REPORT is
+ * defined -- the demo build script's --assembler-report option compiles
+ * v3d_assembler.c a second time with that flag and links it ahead of the
+ * archive. The library carries none of it.
+ *
+ * What it buys: the test links the no-logging archive, where D() is gone, so a
+ * failure there otherwise gives a bare FALSE with nothing to name. And with
+ * v3d_assemble_report_all set, assembly carries on past a failure and records
+ * each one, so a run lists every broken shader instead of only the first --
+ * v3d_assemble_builtin_shaders then returns TRUE even though shaders failed, so
+ * check v3d_assemble_failures, not the return value. The driver always stops at
+ * the first, which is the only thing it can sensibly do.
+ */
+#ifdef MGLV3D_ASSEMBLE_REPORT
+extern const char* v3d_assemble_error_shader;   /* the most recent failure */
+extern const char* v3d_assemble_error_what;
+extern const char* v3d_assemble_error_text;
+extern int         v3d_assemble_error_index;    /* -1 until something fails */
+
+#define V3D_ASSEMBLE_MAX_FAILURES 16
+
+extern int         v3d_assemble_report_all;     /* caller sets this to collect all */
+extern int         v3d_assemble_failures;       /* how many failed, may exceed the array */
+extern const char* v3d_assemble_failed_name[V3D_ASSEMBLE_MAX_FAILURES];
+extern const char* v3d_assemble_failed_what[V3D_ASSEMBLE_MAX_FAILURES];
+extern const char* v3d_assemble_failed_text[V3D_ASSEMBLE_MAX_FAILURES];
+extern int         v3d_assemble_failed_index[V3D_ASSEMBLE_MAX_FAILURES];
+
+/*
+ * Assemble one shader the driver does not carry, into the caller's own
+ * V3DAssembledShader. shader_assembler_test uses this for the textured fragment
+ * shader: it is the only shader with checked-in known-good machine code
+ * (a demo header, copied from the earlier library, so it predates this assembler),
+ * but no selector reaches it, so its assembly text lives with the test.
+ */
+int v3d_assemble_shader(V3DDevice* device, const char* name,
+                        const char** assemblyLines, int numAssemblyLines,
+                        V3DAssembledShader* out);
+
+#endif /* MGLV3D_ASSEMBLE_REPORT */
 
 #endif /* V3D_SHADER_ASSEMBLER_H */

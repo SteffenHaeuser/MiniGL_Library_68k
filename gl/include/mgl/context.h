@@ -68,7 +68,14 @@
 #include "../../../backend/include/v3d_context.h"
 #include "../../../backend/include/v3d_texture.h"
 
+/* Amiga alignment for the OS structs intuition.h declares, and for
+ * LockTimeHandle below. VBCC needs it told; GCC lays these out that way of its
+ * own accord and only warns -Wunknown-pragmas at every include site, so the
+ * pair is guarded rather than dropped. Guarding changes no layout for either
+ * compiler -- GCC already ignored both lines. */
+#ifdef __VBCC__
 #pragma amiga-align
+#endif
 
 #include <intuition/intuition.h>
 
@@ -78,7 +85,9 @@ typedef struct LockTimeHandle_s
 	ULONG e_freq;
 } LockTimeHandle;
 
+#ifdef __VBCC__
 #pragma default-align
+#endif
 
 typedef struct GLcontext_t * GLcontext;
 
@@ -108,7 +117,12 @@ typedef enum
 	 * GLIndexPointer (vertexarray.c). */
 	GLCS_INDEX    = 0x10,
 	GLCS_EDGEFLAG = 0x20,
-	GLCS_MASK    = 0x3F,
+	/* GL_NORMAL_ARRAY. Unlike INDEX and EDGEFLAG above, this one IS drawn
+	 * from: it is what lets an array draw carry a per-vertex normal instead
+	 * of pinning every vertex to NormalBuffer[0]. See GLNormalPointer and
+	 * GatherVertexFromArray (vertexarray.c). */
+	GLCS_NORMAL   = 0x40,
+	GLCS_MASK    = 0x7F,
 } ClientStates;
 
 typedef void (*KeyHandlerFn)(char key);
@@ -215,6 +229,79 @@ typedef struct GLarray_t
 	GLvoid*     pointer;        /* Pointer to the actual data */
 } GLarray;
 
+/*
+ * Lighting state. GL 1.1's full per-light and material parameter set is stored
+ * whether or not the shader consumes it yet, for one reason: glGetLightfv and
+ * glGetMaterialfv must answer with what the application set, and a parameter
+ * that is dropped on the way in cannot be answered with later. What is NOT
+ * consumed is documented in gl.h rather than being silently absent here.
+ *
+ * MGL_MAX_LIGHTS is 8, GL 1.1's minimum and, in this driver, its maximum: the
+ * lit shader unrolls each light inline because the QPU text assembler rejects
+ * branch instructions, so the number of lights a variant supports is baked into
+ * that variant. Enabling more lights than the widest variant supports clamps,
+ * with one line on the serial console naming the clamp -- it does not fail.
+ */
+#define MGL_MAX_LIGHTS 8
+
+/* What glGetIntegerv(GL_MAX_TEXTURE_SIZE) answers AND what glTexImage2D
+ * rejects above -- ONE number, never two copies that have to agree.
+ *
+ * It is V3D 4.2's OWN LIMIT, 4096, and not a figure chosen here. A lower value
+ * makes glTexImage2D refuse textures the hardware samples perfectly well, with
+ * GL_INVALID_VALUE and no upload, so the draw shows blank geometry instead of
+ * failing loudly: a client application's credits scroller alone is 512x2048, and it is the
+ * only one of its 121 textures above 1024.
+ *
+ * 4096 agrees with MESA: V3D_MAX_MIP_LEVELS is 13 (v3d_limits.h), i.e. 4096
+ * down to 1x1. Base MiniGL answers 256, which is not a hardware limit either,
+ * and an application that sizes its textures from the answer downscales
+ * anything larger to fit it.
+ *
+ * COST, stated rather than implied: nothing, until an application asks for it.
+ * A 4096x4096 RGBA8 level 0 would be 64MB plus a third for its chain, which is
+ * the application's choice to make on a target with RAM to spare. */
+#define MGL_MAX_TEXTURE_SIZE 4096
+
+typedef struct MGLLight_t
+{
+	GLfloat     Ambient[4];
+	GLfloat     Diffuse[4];
+	GLfloat     Specular[4];
+
+	/* EYE SPACE, not the coordinates the application passed. GL specifies that
+	 * glLightfv(GL_POSITION) transforms its argument by the MODELVIEW MATRIX IN
+	 * FORCE AT THE TIME OF THE CALL, so the transform happens in the setter and
+	 * this field is already in eye coordinates. Getting that wrong is invisible
+	 * in a scene that sets its lights under an identity modelview and wrong in
+	 * every other one.
+	 *
+	 * The 4th component is the light's TYPE and must be preserved, not
+	 * normalised away: w == 0 is a directional light, whose position is a
+	 * direction, and w != 0 is a positional (point) light, whose direction
+	 * varies per vertex. */
+	GLfloat     Position[4];
+
+	GLfloat     SpotDirection[3];
+	GLfloat     SpotExponent;
+	GLfloat     SpotCutoff;
+
+	/* GL defaults (1,0,0): constant 1, no linear or quadratic falloff, i.e. no
+	 * distance attenuation at all unless the application asks for it. */
+	GLfloat     ConstantAttenuation;
+	GLfloat     LinearAttenuation;
+	GLfloat     QuadraticAttenuation;
+} MGLLight;
+
+typedef struct MGLMaterial_t
+{
+	GLfloat     Ambient[4];
+	GLfloat     Diffuse[4];
+	GLfloat     Specular[4];
+	GLfloat     Emission[4];
+	GLfloat     Shininess;
+} MGLMaterial;
+
 struct GLcontext_t
 {
 	/*
@@ -268,7 +355,16 @@ struct GLcontext_t
 
 	GLfloat   * WBuffer;
 
-	UWORD     * ElementIndex; //for glArrayElement
+	/* glArrayElement's recorded indices. THIRTY-TWO BIT: at UWORD width an
+	 * index of 65536 or more silently wraps to the wrong vertex. The pointer
+	 * is the same size either way, so no GLcontext offset depends on the
+	 * ELEMENT width, and minigl.h's inline glArrayElement writes into this
+	 * array directly. A client compiled against a 16-bit-element header
+	 * writes 16-bit values here and nothing refuses it: structSize covers the
+	 * dispatch table, not this struct, and the abiVersion guard only protects a
+	 * new client from an old library, never the reverse. Everything that uses
+	 * glArrayElement has to be built against this header. */
+	GLuint    * ElementIndex;
 
 	/* glArrayElement(i) must behave like real OpenGL and use the CURRENT
 	 * texcoord (as of THIS call) for any vertex whose
@@ -478,10 +574,44 @@ struct GLcontext_t
 
 	GLenum                  TexEnv[MAX_TEXUNIT];
 	GLenum                  CurTexEnv;
-	GLenum                  MinFilter;
-	GLenum                  MagFilter;
-	GLenum                  WrapS;
-	GLenum                  WrapT;
+	/*
+	 * FOUR GLenum-sized slots, in use below as RequestedBuffers,
+	 * CurPolygonModeBack, CloseWorkbench and PerspectiveMapping_State.
+	 *
+	 * A field here is renamed in place rather than deleted: minigl.h's
+	 * inlines bake GLcontext offsets into already-compiled client objects, so
+	 * removing a field would move every field after it. A rename is free
+	 * because minigl.h dereferences only CurrentColor, VertexBuffer(Pointer),
+	 * UpdateCurrentColor, NormalBuffer(Pointer), ShadeModel, ClientState,
+	 * CurrentTexQValid, ElementIndex, CurrentPointSize and ActiveTexture --
+	 * none of these four. Two GLboolean-sized slots are still free further
+	 * down (unused_5, unused_6); reuse those before appending.
+	 */
+	/* Buffer count the application ASKED mglChooseNumberOfBuffers for, not the
+	 * count it got: every request is downgraded to 1 unless the library is built
+	 * with MGLV3D_DOUBLE_BUFFER_ENABLED (context.c). glDrawBuffer/glReadBuffer
+	 * validate the BACK names against this, so a program that asked for double
+	 * buffering may name the second buffer and one that never asked still gets
+	 * GL 1.1's GL_INVALID_OPERATION. Reused from the reserved slots below. */
+	GLuint                  RequestedBuffers;
+	/* glPolygonMode's BACK mode; CurPolygonMode is the front one. GL keeps a
+	 * mode per face and glGetIntegerv(GL_POLYGON_MODE) returns both. Reused
+	 * from the reserved slots above rather than appended, so the struct does
+	 * not grow. */
+	GLenum                  CurPolygonModeBack;
+	/* mglProposeCloseDesktop's request, captured when the display opens so the
+	 * close path reopens the Workbench only if THIS context closed it. The
+	 * request itself stays a file static like the other mglChoose* ones, but a
+	 * static in the resident library is per-LIBRARY, so without this capture
+	 * one program's choice reached the next. Reused from the reserved slots. */
+	GLboolean               CloseWorkbench;
+	/* mglSetState(MGL_PERSPECTIVE_MAPPING)'s flag, stored so glIsEnabled can
+	 * answer it. Nothing reads it to render: perspective correction is not
+	 * optional on this hardware and the non-perspective CL packet is never
+	 * emitted, so this records what the application asked for, the way the
+	 * three state-only capabilities below do. Defaults GL_TRUE, which is what
+	 * the hardware does. Reused from the reserved slots. */
+	GLboolean               PerspectiveMapping_State;
 
 	GLfloat                 FogRange;
 	GLfloat                 FogMult;
@@ -541,11 +671,14 @@ struct GLcontext_t
 
 /* Begin Joe Sera Oct. 21, 2000  */
 	/*
-	** GL Current Modes and States
-	*/
-
-	GLboolean CurWriteMask ;    /* GL_DEPTH_WRITE_MASK   */
-	GLboolean CurDepthTest ;    /* GL_DEPTH_TEST         */
+	 * RESERVED, two more 4-byte slots -- GLboolean is unsigned int here, so
+	 * these hold anything the GLenum-sized four above could. Depth
+	 * state lives in DepthMask and DepthTest_State, the fields draw.c and
+	 * mgl_QueryState read. Renamed rather than deleted: removing a field moves
+	 * every field after it, and minigl.h bakes offsets into compiled clients.
+	 */
+	GLboolean unused_5 ;
+	GLboolean unused_6 ;
 
 
 /* End Joe Sera Oct. 21 2000 */
@@ -637,8 +770,10 @@ struct GLcontext_t
 	 * None of it reaches a pixel, and each for a reason GL itself gives. The
 	 * current index and the index array have no effect in RGBA mode, the only
 	 * mode this context has. The edge flag and its array only mark boundary
-	 * edges for glPolygonMode GL_LINE/GL_POINT, which this driver does not
-	 * implement. The read buffer can only ever be the front, which is where
+	 * edges for glPolygonMode GL_LINE/GL_POINT; GL_LINE draws now, but the flag
+	 * cannot be honoured without a per-vertex field in MGLVertex, whose layout
+	 * is part of the compiled-client ABI -- see GLEdgeFlag's own comment. The
+	 * read buffer can only ever be the front, which is where
 	 * GLReadPixels already reads. What an application CAN observe is the state
 	 * itself, through the queries -- so it is kept, with GL's defaults. */
 	GLfloat         CurrentIndex;          /* GL_CURRENT_INDEX, default 1 -- GL keeps it as a float */
@@ -655,9 +790,11 @@ struct GLcontext_t
 	 * legal names with nothing for the driver to do -- are named explicitly
 	 * rather than turned into errors:
 	 *  - GL_POLYGON_OFFSET_LINE / GL_POLYGON_OFFSET_POINT offset polygons drawn
-	 *    in line or point polygon mode. glPolygonMode is inert here, so there
-	 *    is never such a polygon to offset. draw.c's depth offset reads
-	 *    PolygonOffsetFill_State, never these two, and must go on doing so.
+	 *    in line or point polygon mode. GL_LINE draws as real lines here
+	 *    by the rasterizer's own fill bits (CFG_BITS, set in draw.c) rather
+	 *    than as offsettable polygons, so neither offset has anything to apply
+	 *    to. draw.c's depth offset reads PolygonOffsetFill_State, never these
+	 *    two, and must go on doing so.
 	 *  - GL_SHARED_TEXTURE_PALETTE_EXT picks the shared palette over per-texture
 	 *    ones. This driver has only the shared palette (GLColorTable), applied
 	 *    at upload, so it is in effect either way.
@@ -746,6 +883,131 @@ struct GLcontext_t
 	 * a program composite our output alongside another renderer's instead of
 	 * the two fighting over one window. */
 	GLboolean   ExternalBitMap;
+
+	/* LIGHTING STATE. glEnable(GL_LIGHTING) and the GL_LIGHTi flags, the eight
+	 * lights, the front material, the light model, and the folded products the
+	 * lit vertex shader's uniform tail is written from.
+	 *
+	 * APPENDED after the existing fields, per the rule above: this context is
+	 * shared with minigl.library's clients, so no existing field may move.
+	 *
+	 * Lit draws are selected by Lighting_State AND a non-zero LightMask -- GL
+	 * lights nothing when GL_LIGHTING is on but every light is off, and that is
+	 * not the same as lighting being disabled, because the material's emission
+	 * and the light-model ambient still apply. Both conditions are read in
+	 * draw.c; neither is sufficient alone. */
+	GLboolean   Lighting_State;
+	MGLLight    Light[MGL_MAX_LIGHTS];
+	MGLMaterial Material;
+
+	/* GL_LIGHT_MODEL_AMBIENT. The other two light-model parameters are stored
+	 * and never acted on -- see the note in gl.h on why two-sided lighting is
+	 * out of reach at this vertex stage. */
+	GLfloat     LightModelAmbient[4];
+	GLboolean   LightModelTwoSide;
+	GLboolean   LightModelLocalViewer;
+
+	/* Which lights are enabled, bit i for GL_LIGHTi. A MASK and not a count,
+	 * because the shader's uniform tail is COMPACTED: whichever lights are on
+	 * are written into tail slots 0..n-1 in ascending light order, so two draws
+	 * with the same NUMBER of lights but different lights enabled need different
+	 * uniform blocks. The uniform memo key therefore carries the mask, not the
+	 * count -- the count is a function of the mask.
+	 *
+	 * This is load-bearing rather than tidy: the demo lights exclusively through
+	 * GL_LIGHT1 and never touches GL_LIGHT0, and GL gives light 0 a default
+	 * diffuse and specular of (1,1,1,1) while lights 1-7 get (0,0,0,1). An
+	 * implementation that assumed light 0 was the active one would render the
+	 * whole demo black. */
+	GLuint      LightMask;
+
+	/* Bumped by every glLight*, glMaterial*, glLightModel* and by MGLSetState on
+	 * GL_LIGHTING or a GL_LIGHTi. The uniform memo in draw.c compares it, the
+	 * same way g_mglv3d_combined_serial covers the modelview and InvRot: without
+	 * it a second lit draw in one frame reuses the first draw's uniform block,
+	 * because every other term of that key still matches. */
+	GLuint      LightSerial;
+
+	/* THE FOLD, recomputed by light_Fold whenever any of the above changes.
+	 * These are what the uniform tail is written from, so the per-draw path does
+	 * no light x material arithmetic at all.
+	 *
+	 * LitBase is the whole light-independent term: material emission, plus the
+	 * light-model ambient times the material ambient, plus each ENABLED light's
+	 * ambient times the material ambient. Its alpha is the material diffuse
+	 * alpha, which is what GL gives a lit vertex.
+	 *
+	 * LitDiffuse[i] is light i's diffuse times the material diffuse, per
+	 * channel. Only the enabled lights' entries are meaningful, and they are
+	 * indexed by LIGHT NUMBER here -- the compaction into tail slots happens at
+	 * uniform-write time, not here, so that this array can be read by light
+	 * number when answering glGetLightfv.
+	 *
+	 * LitSpecular[i] is light i's specular times the material specular, same
+	 * indexing. */
+	GLfloat     LitBase[4];
+	GLfloat     LitDiffuse[MGL_MAX_LIGHTS][3];
+	GLfloat     LitSpecular[MGL_MAX_LIGHTS][3];
+
+	/* GL_DRAW_BUFFER, default GL_FRONT. Read only by the glGet query -- this
+	 * context is single-buffered so drawing goes to the one buffer whatever it
+	 * says. APPENDED, per the rule above: no existing field may move. */
+	GLenum      DrawBufferMode;
+
+	/*
+	 * GL_NORMAL_ARRAY (glNormalPointer). APPENDED here rather than added to
+	 * MGLAPointer, which is where the other array pointers live: MGLAPointer
+	 * is a BY-VALUE member of this struct, so growing it would move every
+	 * field after ArrayPointer and break the GLcontext offsets minigl.h's
+	 * inlines bake into already-compiled clients.
+	 *
+	 * NormalArrayStride is kept as the application gave it, for the
+	 * GL_NORMAL_ARRAY_STRIDE query; NormalArrayStep is the resolved byte step
+	 * the gather actually walks, so the draw path never re-derives it.
+	 */
+	const GLvoid *NormalArrayPointer;
+	GLenum        NormalArrayType;
+	GLsizei       NormalArrayStride;
+	GLint         NormalArrayStep;
+
+	/*
+	 * GL_COLOR_MATERIAL: the named material component tracks the per-vertex
+	 * colour. APPENDED, per the rule above.
+	 *
+	 * ColorMaterialMode is stored as GL's own token so glGet can answer
+	 * GL_COLOR_MATERIAL_PARAMETER with what was set; light_Fold turns it into
+	 * the four selectors below. The face is stored for the same reason and is
+	 * not otherwise read -- there is one material here, not GL's pair.
+	 *
+	 * THE SECOND FOLD. Every tracked term is LINEAR in the vertex colour, so
+	 * each one folds to K0 + K1 * C with both halves known once the state is
+	 * set. K0 is the existing LitBase/LitDiffuse/LitSpecular -- with the
+	 * tracked material component taken as zero there -- and the three arrays
+	 * here are K1. With colour material off every K1 is zero, which is why the
+	 * uniform tail could be EXTENDED rather than rearranged: words 0..34 keep
+	 * their meaning and the five shaders that read them are untouched.
+	 *
+	 * LitBaseC's alpha is the alpha half of the same split: GL gives a lit
+	 * vertex the material DIFFUSE alpha, so tracking diffuse makes the vertex
+	 * colour's own alpha the answer.
+	 */
+	GLboolean   ColorMaterial_State;
+	GLenum      ColorMaterialFace;
+	GLenum      ColorMaterialMode;
+	GLfloat     LitBaseC[4];
+	GLfloat     LitDiffuseC[MGL_MAX_LIGHTS][3];
+	GLfloat     LitSpecularC[MGL_MAX_LIGHTS][3];
+
+	/*
+	 * GL_TEXTURE_ENV_COLOR, per unit as the mode is (GL 1.1 3.8.9). Read only
+	 * by GL_BLEND, the one mode whose equation has a constant in it. GL's
+	 * default is (0,0,0,0).
+	 *
+	 * APPENDED here rather than beside TexEnv[], where it reads better and
+	 * would shift every field after it -- minigl.h's inlines bake GLcontext
+	 * offsets into already-compiled clients, so nothing may move.
+	 */
+	GLfloat     TexEnvColor[MAX_TEXUNIT][4];
 
 };
 

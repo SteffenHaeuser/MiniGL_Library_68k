@@ -71,7 +71,6 @@
 #include "sysinc.h"
 #include "../../backend/hw/v3d_debug.h"
 
-static char rcsid[] = "$Id: vertexarray.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
 extern void d_DrawTriangles(GLcontext context);
 extern void d_DrawTriangleStrip(GLcontext context);
@@ -125,6 +124,12 @@ void GLEnableClientState(GLcontext context, GLenum state)
 			context->ClientState |= GLCS_EDGEFLAG;
 			break;
 
+		/* Unlike the two above, this one IS drawn from -- see
+		 * GatherVertexFromArray. */
+		case GL_NORMAL_ARRAY:
+			context->ClientState |= GLCS_NORMAL;
+			break;
+
 		default:
 			GLFlagError(context, 1, GL_INVALID_ENUM);
 			break;
@@ -158,6 +163,10 @@ void GLDisableClientState(GLcontext context, GLenum state)
 
 		case GL_EDGE_FLAG_ARRAY:
 			context->ClientState &= ~GLCS_EDGEFLAG;
+			break;
+
+		case GL_NORMAL_ARRAY:
+			context->ClientState &= ~GLCS_NORMAL;
 			break;
 
 		default:
@@ -303,6 +312,30 @@ void GLTexCoordPointer(GLcontext context, GLint size, GLenum type, GLsizei strid
 }
 
 /*
+ * glNormalPointer. The size is always 3 in GL, so there is no size argument.
+ *
+ * GL_FLOAT only, and fail-closed like the three setters above rather than
+ * leaving the previous array in place: the draw path dereferences this pointer,
+ * so a refused call must not leave a stale one armed. GL 1.1 also allows
+ * GL_BYTE, GL_SHORT, GL_INT and GL_DOUBLE here; they are refused with
+ * GL_INVALID_ENUM rather than silently mis-read.
+ */
+void GLNormalPointer(GLcontext context, GLenum type, GLsizei stride, const GLvoid *pointer)
+{
+	if (type != GL_FLOAT || stride < 0)
+	{
+		GLFlagError(context, 1, (type != GL_FLOAT) ? GL_INVALID_ENUM : GL_INVALID_VALUE);
+		context->NormalArrayPointer = NULL;
+		return;
+	}
+
+	context->NormalArrayPointer = pointer;
+	context->NormalArrayType    = type;
+	context->NormalArrayStride  = stride;	/* as given, for the query */
+	context->NormalArrayStep    = (stride != 0) ? stride : 3 * (GLint)sizeof(GLfloat);
+}
+
+/*
  * glIndexPointer / glEdgeFlagPointer.
  *
  * Both arrays are STORED and never GATHERED, and that is the right amount of
@@ -375,10 +408,12 @@ void GLClientActiveTextureARB(GLcontext context, GLenum unit)
 }
 
 /*
- * GLInterleavedArrays: decodes the 6 GL_*_V3F format enums into
+ * GLInterleavedArrays: decodes the EIGHT format enums gl.h declares into
  * ArrayPointer settings directly (matching the original's own per-format
  * offset math), setting ClientState to exactly the bits each format
- * implies. No Set_W3D_* calls, no Convert function-pointer selection
+ * implies. gl.h declares eight of GL 1.1's fourteen; the other six carry a
+ * normal or a 4-component texture coordinate and have no token here, so a
+ * caller cannot name one. No Set_W3D_* calls, no Convert function-pointer selection
  * (the original picked a Convfn here for its own later use during
  * transform -- the gathers branch on colormode/vertexsize/texcoordsize
  * directly instead, no separate conversion-function abstraction needed).
@@ -401,6 +436,27 @@ void GLInterleavedArrays(GLcontext context, GLenum format, GLsizei stride, const
 			PTR.verts = (UBYTE*)pointer;
 			PTR.vertexsize = 3;
 			PTR.vertexstride = (stride != 0) ? stride : 3 * sizeof(GLfloat);
+			break;
+
+		/* THE TWO 2-COMPONENT FORMATS, laid out as GL 1.1 specifies: V2F is
+		 * two floats, and C4UB_V2F puts the four colour bytes FIRST and the
+		 * two position floats at +4, for a packed stride of 12. They reach the
+		 * generic gather, which honours vertexsize 2; the fast decode loops
+		 * take size 3 only, so a 2-component array simply does not use them. */
+		case GL_V2F:
+			context->ClientState = GLCS_VERTEX;
+			PTR.verts = (UBYTE*)pointer;
+			PTR.vertexsize = 2;
+			PTR.vertexstride = (stride != 0) ? stride : 2 * sizeof(GLfloat);
+			break;
+
+		case GL_C4UB_V2F:
+			context->ClientState = GLCS_VERTEX | GLCS_COLOR;
+			PTR.colors = (UBYTE*)pointer;
+			PTR.verts = (UBYTE*)pointer + 4;
+			PTR.colormode = MGLA_COLOR_UBYTE_RGBA;
+			PTR.vertexsize = 2;
+			PTR.vertexstride = PTR.colorstride = (stride != 0) ? stride : (2 * sizeof(GLfloat) + 4 * sizeof(GLubyte));
 			break;
 
 		case GL_C4UB_V3F:
@@ -582,7 +638,38 @@ static __attribute__((noinline)) void GatherVertexFromArray(GLcontext context, i
 
 	dst->bx = x; dst->by = y; dst->bz = z; dst->bw = w;
 	dst->v.x = x; dst->v.y = y; dst->v.z = z; dst->v.w = w;
-	dst->normal = 0;
+
+	/*
+	 * MGLVertex.normal is an INDEX into NormalBuffer, not a normal, so a
+	 * per-vertex normal means writing the gathered value into this vertex's own
+	 * NormalBuffer slot and pointing at it. dstIndex is safe as that slot:
+	 * NormalBuffer is allocated at VertexBufferSize, the same bound dstIndex
+	 * already respects.
+	 *
+	 * Slot 0 doubles as the CURRENT normal (GLBegin copies the last pushed one
+	 * down into it), so the dstIndex==0 vertex overwrites it. That is what GL
+	 * 1.1 specifies: the current normal is undefined after a DrawArrays or
+	 * DrawElements that had GL_NORMAL_ARRAY enabled.
+	 *
+	 * Without the array this stays 0 exactly as before, which is what keeps the
+	 * whole feature behind the lit switch: draw.c only reads NormalBuffer when
+	 * its D_SR_LIT shape bit is set, so an unlit array draw pays nothing here
+	 * beyond the branch.
+	 */
+	if ((context->ClientState & GLCS_NORMAL) && context->NormalArrayPointer != NULL)
+	{
+		const GLfloat *nsrc = (const GLfloat *)((const GLubyte *)context->NormalArrayPointer
+		                                        + srcIndex * context->NormalArrayStep);
+
+		context->NormalBuffer[dstIndex].x = nsrc[0];
+		context->NormalBuffer[dstIndex].y = nsrc[1];
+		context->NormalBuffer[dstIndex].z = nsrc[2];
+		dst->normal = dstIndex;
+	}
+	else
+	{
+		dst->normal = 0;
+	}
 	/* Real per-pixel Q perspective correction: array-mode vertices never go
 	 * through GLTexCoord4f, so `.q` here would otherwise be whatever stale
 	 * value was left in this VertexBuffer slot by an unrelated earlier draw
@@ -713,9 +800,9 @@ static __attribute__((noinline)) void GatherVertexFromArray(GLcontext context, i
  * colours come from g_ub2f. The generic gather moves a float position through
  * the FPU, which differs from the raw copy only for a signalling NaN (quieted)
  * or, on an FPU that flushes to zero, a denormal. .bx/.by/.bz/.bw are not
- * written: their readers are the CPU clipper (hclip.c/aclip.c, v_Transform,
- * d_ConservativeDecideFrontface), which has no callers; reviving it needs
- * them back. Used here by GLDrawArrays and, from vertexelements.c, by
+ * written: the CPU clipping path (hclip.c/aclip.c, v_Transform) is what reads
+ * them, so enabling it needs them back. Used here by GLDrawArrays and, from
+ * vertexelements.c, by
  * DrawLockedTriangles and the GLDrawElements GL_TRIANGLES loop.
  */
 enum { GF_COL_F4, GF_COL_RGBA, GF_COL_ARGB };
@@ -741,6 +828,17 @@ static const ULONG s_gf_zero2[2] = { 0, 0 };	/* unit 1 off: u1 = v1 = 0.0f */
 static int gf_decode(GLcontext context, gf_layout *L, int elem_snapshots)
 {
 	const MGLAPointer *ap = &context->ArrayPointer;
+
+	/*
+	 * A normal array is handled by the generic gather, never here. gf_vertex is
+	 * always_inline with pos_int/col_kind as compile-time constants so each loop
+	 * is straight-line code; carrying a normal would either add a third
+	 * specialisation dimension or put a test in the per-vertex path. Declining
+	 * costs a lit array draw the fast loop and costs an unlit one nothing at
+	 * all, which is the point -- the existing loops stay byte-identical.
+	 */
+	if ((context->ClientState & GLCS_NORMAL) && context->NormalArrayPointer != NULL)
+		return 0;
 
 	if (ap->vertexsize != 3)
 		return 0;

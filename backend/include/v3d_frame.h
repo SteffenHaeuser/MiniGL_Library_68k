@@ -12,21 +12,23 @@
  * MiniGLV3D -- persistent per-context GPU memory pools + binner
  * out-of-memory (OOM) spill handling.
  *
- * Sizing formulas for zbuffer/tile_state/tile_alloc match PoC/v3d_cle.c's
- * CL_Draw_Triangle (lines ~627-636) with two deliberate changes: the
- * zbuffer's bytes-per-pixel factor follows zbuffer_bits (the PoC fixes it
- * at 2; see v3d_frame_compute_pool_sizes), and tile_alloc's size drops the
- * PoC's extra "+= 1024*1024" margin, matching MESA's own
+ * Sizing formulas for zbuffer/tile_state/tile_alloc match the
+ * CL_Draw_Triangle of an earlier library by the same author, with two
+ * deliberate changes: the zbuffer's bytes-per-pixel factor follows
+ * zbuffer_bits (the earlier library fixes it at 2; see
+ * v3d_frame_compute_pool_sizes), and tile_alloc's size drops
+ * the earlier library's extra "+= 1024*1024" margin, matching MESA's own
  * production alloc_tile_state(), which uses exactly tilesX*tilesY*64,
  * align(4096), +8192, +512*1024, with no further margin; MESA's comments
  * explain each term (8192 = the PTB's first two automatic chunk allocations,
  * so OOM isn't hit immediately even with zero real geometry; 512*1024 = perf
  * margin, not correctness). Real robustness beyond that initial size comes
  * from the OOM-interrupt spill mechanism below, not from over-provisioning
- * upfront -- so the PoC's extra 1MB isn't needed once spill handling exists.
+ * upfront -- so the earlier library's extra 1MB isn't needed once spill handling
+ * exists.
  *
  * OOM handling: V3D_CTL_INT_STS bit V3D_INT_OUTOMEM (v3d_regs.h, cross-
- * referenced against PoC/linuxregs.c's Linux kernel v3d register header)
+ * referenced against the Linux kernel v3d register header)
  * signals the binner ran out of tile allocation memory mid-frame. Response
  * (confirmed against MESA's own ISR, src/broadcom/simulator/v3dx_simulator.c
  * v3d_isr_core): allocate a new block, write its address/size to

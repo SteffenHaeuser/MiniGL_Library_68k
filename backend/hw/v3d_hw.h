@@ -53,8 +53,9 @@
 // - V3D 7.1 (Raspberry Pi 5)
 
 //
-// This file is the declarations/struct half of PoC/v3d_v3d.h, split out of
-// its single-header (#define V3D_IMPLEMENTATION) form so several .c files
+// This file is the declarations/struct half of the header
+// an earlier library by the same author used, split out of its single-header
+// (#define V3D_IMPLEMENTATION) form so several .c files
 // can include it without one of them having to define V3D_IMPLEMENTATION
 // first. The function bodies live in v3d_hw.c, except the inline
 // v3d_buffer_claim_memory_fast below (v3d_power_on and v3d_reset have none). Base typedefs (v3d_address, v3d_u32, LE32/LE16/NOP, etc.)
@@ -109,7 +110,7 @@ typedef unsigned short v3d_uword;
 // time: many still carry the generator's declarations (e.g.
 // `v3d_uint operation : 8`), so check one against MESA's v3d_packet.xml and
 // the rules at v3d_indexed_prim_list before use.
-// The #pragma pack(push,1) below comes from PoC/v3d_commands.c, where it
+// The #pragma pack(push,1) below comes from the earlier library, where it
 // wrapped the #include of this file.
 #pragma pack(push,1)
 

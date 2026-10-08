@@ -1,9 +1,9 @@
 /*
- * Implementation half of PoC/v3d_v3d.h's single-header
- * (#define V3D_IMPLEMENTATION) design; see v3d_hw.h for why this is split
- * into a normal .h/.c pair. License/provenance for this code is in the
- * comment header at the top of v3d_hw.h (MIT-style, Macoy Madson, with
- * portions derived from Mesa per that file's own attribution).
+ * Implementation half of the single-header (#define V3D_IMPLEMENTATION)
+ * design an earlier library by the same author used; see v3d_hw.h for why
+ * this is split into a normal .h/.c pair. License/provenance for this code
+ * is in the comment header at the top of v3d_hw.h (MIT-style, Macoy Madson,
+ * with portions derived from Mesa per that file's own attribution).
  *
  * v3d_power_on() and v3d_reset(), declared in v3d_hw.h, have no body here;
  * the power-on sequence is power_on_V3D() in v3d_device.c.
@@ -212,7 +212,7 @@ v3d_bool v3d_buffer_out_of_memory(v3d_static_buffer* buffer)
  * -- Texture tiling --
  * v3d_store_tiled_image converts a linear pixel buffer into the V3D tiled
  * layout given by its tiling_format, for texture upload (v3d_texture.c).
- * The code below is copied verbatim from PoC/v3d_v3d.h.
+ * The code below is copied verbatim from an earlier library by the same author.
  */
 /** @file v3d_cpu_tiling.h
  *

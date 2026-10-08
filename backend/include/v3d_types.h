@@ -13,9 +13,10 @@
  * Warp3D.h and of MiniGL's gl.h -- the backend must not depend on either,
  * only the other direction (MiniGL depends on the backend).
  *
- * v3d_mem mirrors PoC/v3d_structs.h's struct of the same name. This is
- * the canonical definition -- v3d_device.h's allocator uses it from here,
- * with no dependency on PoC/.
+ * v3d_mem mirrors the struct of the same name in
+ * an earlier library by the same author. This is the canonical definition --
+ * v3d_device.h's allocator uses it from here, with no dependency on
+ * the earlier library.
  */
 
 typedef unsigned char  v3d_u8;
@@ -24,15 +25,28 @@ typedef unsigned int   v3d_u32;
 typedef int             v3d_i32;
 
 /*
- * v3d_hw.h (lifted from PoC/v3d_v3d.h, the register/CLE-struct layer)
+ * v3d_hw.h (lifted from the earlier library's register/CLE-struct layer)
  * takes its base types from this file, so the full base-typedef set is
  * defined here, not just the four above: v3d_hw.h references
  * v3d_address/v3d_uintptr/v3d_u64/etc. The typedefs below come from
- * PoC/v3d_structs.h:4-25.
+ * the earlier library too.
+ */
+/*
+ * These two must be spelled with the compiler's OWN type macros, not with
+ * `unsigned long`. Both are 4 bytes on this target, so C never notices the
+ * difference, but they are DISTINCT TYPES: the toolchain's stdint.h defines
+ * uint32_t as __UINT32_TYPE__, which is `unsigned int` in every configuration
+ * here (C and C++, clib2 and libnix, all checked). A C++ translation unit that
+ * sees both spellings rejects the second as a conflicting declaration, which is
+ * what stops a C++ application including this header at all.
+ *
+ * The guard is kept because clib2's own stdint.h sets it, but it is not
+ * load-bearing: with the types identical, a double definition is legal rather
+ * than a conflict, so it does not matter whether the guard fires.
  */
 #ifndef _STDINT_H
-typedef unsigned long  uint32_t;
-typedef unsigned long  uintptr_t;
+typedef __UINT32_TYPE__  uint32_t;
+typedef __UINTPTR_TYPE__ uintptr_t;
 #endif
 typedef signed int     v3d_int;
 typedef unsigned long long v3d_u64;
@@ -51,7 +65,7 @@ typedef v3d_u64         v3d_qpu_instruction;
  * GPU is little-endian and the Amiga 68k CPU is big-endian; v3d_hw.c's
  * register reads (e.g. v3d_get_render_frame_count) go through LE32.
  * VBCC inline-asm "pragma" functions, copied verbatim from
- * PoC/v3d_structs.h:79-81 -- Warp3D-free, pure CPU primitives.
+ * the earlier library -- Warp3D-free, pure CPU primitives.
  *
  * GCC branch: unlike the LVO stubs in lvocall_compat.h, these have no
  * external calling-convention to match (nothing outside this codebase
@@ -82,7 +96,7 @@ static __inline__ VOID NOP(VOID)
 #error "v3d_types.h's LE32/LE16/NOP need a __VBCC__ or __GNUC__ branch for this compiler"
 #endif
 
-/* Matches PoC/v3d_structs.h's ALIGN_UP macro exactly (align must be a power of 2). */
+/* Matches the earlier library's ALIGN_UP macro exactly (align must be a power of 2). */
 #define V3D_ALIGN_UP(x, align) (((x) + (align) - 1) & ~((align) - 1))
 
 typedef struct v3d_mem {
@@ -92,7 +106,7 @@ typedef struct v3d_mem {
     void*    hostptr;   /* CPU-side mapped pointer, for filling the buffer */
 } v3d_mem;
 
-/* GPU-side mailbox memory-allocate flags -- v3d_device.c's v3d_mem_alloc needs these. Matches PoC/v3d_structs.h:83-92. */
+/* GPU-side mailbox memory-allocate flags -- v3d_device.c's v3d_mem_alloc needs these. Matches the earlier library's own values. */
 enum {
     MEM_FLAG_DISCARDABLE = 1 << 0,      /* can be resized to 0 at any time; use for cached data */
     MEM_FLAG_NORMAL = 0 << 2,            /* normal allocating alias; don't use from ARM */
@@ -106,8 +120,8 @@ enum {
 
 /*
  * A single append-only control-list buffer (binning list, render list,
- * generic/implicit tile list, or state_buf): PoC's v3d_static_buffer
- * (v3d_structs.h:94-99) plus the overflowed flag.
+ * generic/implicit tile list, or state_buf): the earlier library's
+ * v3d_static_buffer plus the overflowed flag.
  */
 typedef struct v3d_static_buffer {
     v3d_u8* start;

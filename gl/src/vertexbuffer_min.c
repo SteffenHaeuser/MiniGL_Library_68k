@@ -119,13 +119,8 @@ void GLBegin(GLcontext context, GLenum mode)
 			context->CurrentDraw = (DrawFn)d_DrawTriangleFan;
 			break;
 
-		case MGL_FLATFAN:
 		case GL_POLYGON:
-			/* MGL_FLATFAN is a MiniGL-specific mode, not real GL. In
-			 * MiniGL it is a fan given in device coordinates, drawn
-			 * without the current matrices and viewport; here it has no
-			 * such bypass and is drawn exactly like GL_TRIANGLE_FAN
-			 * (nothing in draw.c tests for MGL_FLATFAN). A convex
+			/* A convex
 			 * GL_POLYGON triangulates identically to a fan from vertex 0.
 			 * The original splits GL_POLYGON three ways (d_DrawNormalPoly/
 			 * d_DrawSmoothPoly/d_DrawMtexPoly, chosen by smooth/texture
@@ -137,13 +132,9 @@ void GLBegin(GLcontext context, GLenum mode)
 			context->CurrentDraw = (DrawFn)d_DrawTriangleFan;
 			break;
 
-		case MGL_FLATSTRIP:
 		case GL_TRIANGLE_STRIP:
-			/* MGL_FLATSTRIP (Surgeon's addition to MiniGL, similar to
-			 * MGL_FLATFAN): as with MGL_FLATFAN above, there is no
-			 * device-coordinate bypass; it is drawn exactly like
-			 * GL_TRIANGLE_STRIP, and d_DrawTriangleStrip dispatches
-			 * shading/texture/blend from GL state. */
+			/* d_DrawTriangleStrip dispatches shading, texture and blend
+			 * from GL state. */
 			context->CurrentPrimitive = mode;
 			context->CurrentDraw = (DrawFn)d_DrawTriangleStrip;
 			break;
@@ -159,7 +150,14 @@ void GLBegin(GLcontext context, GLenum mode)
 			break;
 
 		default:
-			GLFlagError(context, 1, GL_INVALID_OPERATION);
+			/* CLEARED, so the matching glEnd discards the block. GLEnd tests
+			 * CurrentDraw, and this is the only arm that leaves no function
+			 * selected -- without the store it keeps the PREVIOUS block's
+			 * function and a bad-mode block is drawn as whatever came before.
+			 * A first-ever bad block drops either way, the field starting NULL
+			 * from MEMF_CLEAR, which is what makes this easy to miss. */
+			context->CurrentDraw = NULL;
+			GLFlagError(context, 1, GL_INVALID_ENUM);
 			break;
 	}
 
@@ -182,6 +180,16 @@ void GLBegin(GLcontext context, GLenum mode)
  */
 void GLArrayElement(GLcontext context, GLint i)
 {
+	/* Same bound check as GLVertex4f, for the same reason: this is the other
+	 * function that advances VertexBufferPointer, and ElementIndex/ElementTexS/
+	 * ElementTexT are all sized to VertexBufferSize. Unguarded it overran three
+	 * allocations at once. */
+	if (context->VertexBufferPointer >= context->VertexBufferSize)
+	{
+		GLFlagError(context, 1, GL_OUT_OF_MEMORY);
+		return;
+	}
+
 	/* Snapshot the CURRENT texcoord (as of THIS call), not just the vertex
 	 * index -- see context.h's ElementTexS/ElementTexT comment for why GL's
 	 * glArrayElement semantics require it and why reading it at gather time
@@ -189,7 +197,7 @@ void GLArrayElement(GLcontext context, GLint i)
 	 * look this exact call's value back up later. */
 	context->ElementTexS[context->VertexBufferPointer] = context->CurrentTexS;
 	context->ElementTexT[context->VertexBufferPointer] = context->CurrentTexT;
-	context->ElementIndex[context->VertexBufferPointer++] = (UWORD)i;
+	context->ElementIndex[context->VertexBufferPointer++] = (GLuint)i;
 	/* Mark THIS sequence as glArrayElement-based -- see context.h's
 	 * comment on UsedArrayElement. */
 	context->UsedArrayElement = GL_TRUE;
@@ -217,9 +225,27 @@ void GLEnd(GLcontext context)
 	 * GLDrawElements/ElementIndex (which they never populate) instead of
 	 * CurrentDraw. UsedArrayElement is reset per sequence by GLBegin and
 	 * set only by a real GLArrayElement call, matching GL semantics. */
+	/*
+	 * A list being compiled captures this block instead of drawing it. The hook
+	 * sits here, AFTER the empty-block early-out and BEFORE the ArrayElement
+	 * dispatch, because dl_CaptureBatch handles both kinds: an ArrayElement block
+	 * travels with its index array and replays through GLDrawElements, a plain one
+	 * replays through CurrentDraw.
+	 *
+	 * It returns GL_TRUE only under GL_COMPILE. GL_COMPILE_AND_EXECUTE captures and
+	 * returns GL_FALSE so the block falls through and also draws now, which is what
+	 * that mode means. A capture that fails to allocate also returns GL_FALSE, so
+	 * the block is drawn at least once rather than silently vanishing.
+	 */
+	if (dl_CaptureBatch(context))
+	{
+		context->CurrentPrimitive = GL_BASE;
+		return;
+	}
+
 	if (context->UsedArrayElement)
 	{
-		GLDrawElements(context, context->CurrentPrimitive, context->VertexBufferPointer, GL_UNSIGNED_SHORT, context->ElementIndex);
+		GLDrawElements(context, context->CurrentPrimitive, context->VertexBufferPointer, GL_UNSIGNED_INT, context->ElementIndex);
 		context->CurrentPrimitive = GL_BASE;
 		return;
 	}
@@ -266,23 +292,35 @@ void GLEnd(GLcontext context)
 	context->CurrentPrimitive = GL_BASE;
 }
 
-/* Surgeon's (marked "surgeon:" in the MiniGL source). */
+/*
+ * glPointSize. Surgeon's (marked "surgeon:" in the MiniGL source), and it
+ * stored whatever it was handed: GL 1.1 4.1 makes a size of zero or less
+ * GL_INVALID_VALUE, and this accepted both. glLineWidth below has always had
+ * the test; its sibling never did, and nothing noticed because no game sets a
+ * point size at all. milestone_l56_width_perdraw's checks 4 and 5 are what
+ * caught it.
+ *
+ * The test has to return explicitly. GLFlagError only RECORDS the error (gl.h),
+ * so a bare flag would fall through and store the rejected value anyway.
+ */
 void GLPointSize(GLcontext context, GLfloat size)
 {
+	if (size <= 0.0f)
+	{
+		GLFlagError(context, 1, GL_INVALID_VALUE);
+		return;
+	}
+
 	context->CurrentPointSize = size;
 }
 
 /*
- * glLineWidth. Read exactly as CurrentPointSize is: by gl_EnsureDrawState
- * (draw.c), which is gated by draw_state_configured, and only gl_FrameBegin
- * resets that flag, when it starts a new pass. So a width changed after a
- * pass's first draw takes effect only in the next pass, and the same holds
- * for point size. Set the width before the pass's first draw.
+ * glLineWidth. Both this and the point size reach the hardware PER DRAW, from
+ * gl_EmitCullBlendState (draw.c), dirty-cached so an unchanged value costs a
+ * float compare and emits nothing -- a width set between two draws of one pass
+ * applies to the second, as GL requires.
  *
- * The zero test has to be explicit. GL says a width of zero or less is
- * GL_INVALID_VALUE and leaves the state alone, but GLFlagError only records
- * the error and does not return (gl.h) -- a bare flag here would fall
- * straight through and hand the hardware a zero-width line.
+ * Same explicit return as glPointSize above, for the same reason.
  */
 void GLLineWidth(GLcontext context, GLfloat width)
 {
@@ -326,8 +364,34 @@ void GLFlush(GLcontext context)
  * backend.fixed_color mirror. Components must already be in [0,1] -- the
  * float entry points clamp (below), the ubyte ones are in range by
  * construction. */
+/*
+ * Colour components clamped to [0,1], which GL specifies and this did not do.
+ *
+ * It is not cosmetic. The packed value below ORs four shifted casts together
+ * WITHOUT masking any of them, so a component outside [0,1] does not merely
+ * saturate its own channel: a negative value casts to a huge v3d_u32 and smears
+ * bits across every other channel as well, and a value above 1 overflows past
+ * its byte. Applications do produce both -- a fade written as
+ * 1.0f - k*(t - t0) goes negative once t passes t0, and its partner k*(t - t0)
+ * climbs above 1.
+ *
+ * The floats are clamped too, not just the packed form, because they are the
+ * per-vertex colour and are also what glGetFloatv(GL_CURRENT_COLOR) reports.
+ */
+static inline GLfloat vb_ClampUnit(GLfloat v)
+{
+	if (v < 0.0f) return 0.0f;
+	if (v > 1.0f) return 1.0f;
+	return v;
+}
+
 static inline void SetCurrentColor(GLcontext context, GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
 {
+	red   = vb_ClampUnit(red);
+	green = vb_ClampUnit(green);
+	blue  = vb_ClampUnit(blue);
+	alpha = vb_ClampUnit(alpha);
+
 	context->CurrentColor.r = red;
 	context->CurrentColor.g = green;
 	context->CurrentColor.b = blue;
@@ -363,11 +427,17 @@ void GLColor3f(GLcontext context, GLfloat red, GLfloat green, GLfloat blue)
 
 void GLColor4fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLColor4f(context, v[0], v[1], v[2], v[3]);
 }
 
 void GLColor3fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLColor4f(context, v[0], v[1], v[2], 1.0f);
 }
 
@@ -391,32 +461,62 @@ void GLColor3ub(GLcontext context, GLubyte red, GLubyte green, GLubyte blue)
 
 void GLColor4ubv(GLcontext context, GLubyte *v)
 {
+	if (v == NULL)
+		return;
+
 	SetCurrentColor(context, (float)v[0] / 255.0f, (float)v[1] / 255.0f, (float)v[2] / 255.0f, (float)v[3] / 255.0f);
 }
 
 void GLColor3ubv(GLcontext context, GLubyte *v)
 {
+	if (v == NULL)
+		return;
+
 	SetCurrentColor(context, (float)v[0] / 255.0f, (float)v[1] / 255.0f, (float)v[2] / 255.0f, 1.0f);
 }
 
 /*
- * GLNormal3f pushes onto context->NormalBuffer[++NormalBufferPointer]
- * exactly like the original; the buffer is allocated by MGLInitContext.
+ * GLNormal3f pushes onto context->NormalBuffer[++NormalBufferPointer]; the
+ * buffer is allocated by MGLInitContext with one entry per vertex-buffer slot.
  * The normal buffer, in place of per-vertex normals, is Surgeon's (MiniGL).
  * No lighting is implemented in this port: the normals' only reader is
  * sphere-map texgen (draw.c's v_GenTexCoords).
- * GLNormal3fv is empty in the original too, and is mirrored as-is.
+ *
+ * The bound check is the same one GLVertex4f carries, for the same reason: the
+ * pointer only ever advances inside a glBegin/glEnd block, so a block longer
+ * than the buffer would otherwise write past the allocation. GL_OUT_OF_MEMORY
+ * is the error GL specifies for an implementation limit reached this way.
  */
 void GLNormal3f(GLcontext context, GLfloat x, GLfloat y, GLfloat z)
 {
-	GLuint nbp = ++context->NormalBufferPointer;
+	GLuint nbp;
+
+	if (context->NormalBufferPointer + 1 >= context->VertexBufferSize)
+	{
+		GLFlagError(context, 1, GL_OUT_OF_MEMORY);
+		return;
+	}
+
+	nbp = ++context->NormalBufferPointer;
 	context->NormalBuffer[nbp].x = x;
 	context->NormalBuffer[nbp].y = y;
 	context->NormalBuffer[nbp].z = z;
 }
 
+/*
+ * The original leaves this body EMPTY, so a normal passed as a vector was
+ * silently discarded while the same normal passed as three floats was kept.
+ * Nothing in the games reaches it -- no game calls glNormal3fv at all -- but
+ * any application that does would have had its texgen fed a stale normal with
+ * no indication why, so it forwards rather than staying a mirror of the
+ * original's omission.
+ */
 void GLNormal3fv(GLcontext context, GLfloat *n)
 {
+	if (n == NULL)
+		return;
+
+	GLNormal3f(context, n[0], n[1], n[2]);
 }
 
 /*
@@ -434,22 +534,24 @@ void GLIndexi(GLcontext context, GLint c)
 
 void GLIndexiv(GLcontext context, const GLint *c)
 {
+	if (c == NULL)
+		return;
+
 	context->CurrentIndex = (GLfloat)(*c);
 }
 
 /*
  * glEdgeFlag / glEdgeFlagv. GL uses the edge flag for one thing: marking
  * which polygon edges are boundary edges when glPolygonMode is GL_LINE or
- * GL_POINT. That mode is inert in this driver -- GLPolygonMode stores it and
- * only the query reads it -- so every polygon is filled, and a filled polygon
- * has no edges for a flag to suppress. Storing the flag and answering
- * GL_EDGE_FLAG is therefore everything GL asks for TODAY.
+ * GL_POINT. Those modes now reach the rasterizer's own fill bits (CFG_BITS,
+ * set in draw.c), so the outline is drawn by the hardware from the triangles
+ * it is given -- there is no CPU edge list for a flag to filter, and nothing
+ * here can suppress an individual edge.
  *
- * CORRECT ONLY WHILE POLYGON MODE STAYS INERT. The day GL_LINE is implemented
- * this becomes load-bearing: GLVertex4f would have to latch the flag per vertex
- * the way it latches the current colour, glEdgeFlagPointer's array would have
- * to be gathered, and the outline pass would have to skip every edge whose
- * starting vertex carries GL_FALSE.
+ * Storing the flag and answering GL_EDGE_FLAG is therefore still everything
+ * this driver can do. GL's default is GL_TRUE, every edge a boundary, so an
+ * application that never calls this is unaffected; one that does gets edges it
+ * asked to suppress.
  */
 void GLEdgeFlag(GLcontext context, GLboolean flag)
 {
@@ -458,6 +560,9 @@ void GLEdgeFlag(GLcontext context, GLboolean flag)
 
 void GLEdgeFlagv(GLcontext context, const GLboolean *flag)
 {
+	if (flag == NULL)
+		return;
+
 	context->CurrentEdgeFlag = (*flag) ? GL_TRUE : GL_FALSE;
 }
 
@@ -497,6 +602,9 @@ void GLTexCoord2f(GLcontext context, GLfloat s, GLfloat t)
 
 void GLTexCoord2fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLTexCoord2f(context, v[0], v[1]);
 }
 
@@ -514,6 +622,26 @@ void GLTexCoord4f(GLcontext context, GLfloat s, GLfloat t, GLfloat r, GLfloat q)
 	 * fixed-function interpolation. real_w_combined covers only smooth-shaded
 	 * single-texture draws (draw.c's `combined`, and smooth_alphatest); every
 	 * other variant uses w = 1.0, so q has no effect there. */
+	/* A q AT OR NEAR ZERO CARRIES NO PERSPECTIVE INFORMATION, and dividing by
+	 * it produced an infinity that did not stay in the texture coordinate:
+	 * draw.c reconstructs the vertex w as 1/q and multiplies x,y,z by it, so a
+	 * zero q sent a NaN position to the GPU. Treated as "no q" instead -- s,t
+	 * stored as given and q forced to 1.0, which is the value glBegin resets it
+	 * to, so the draw simply takes the ordinary w = 1 path. GL leaves q = 0
+	 * undefined, so any finite answer conforms; this one cannot hang the GPU.
+	 * The threshold is the Glide shim's own (it guards `v->oow > 1.0e-8f`
+	 * before using oow at all), not a number invented here. */
+	if (q > -1.0e-8f && q < 1.0e-8f)
+	{
+		context->CurTexU0 = s;
+		context->CurTexV0 = t;
+		context->CurTexQ0 = 1.0f;
+		context->CurrentTexQValid = GL_TRUE;
+		context->CurrentTexS = s;
+		context->CurrentTexT = t;
+		return;
+	}
+
 	/* Current state, latched by glVertex -- but the DIVIDED s/q, t/q, which
 	 * is why CurTexU0/V0 are separate from the raw CurrentTexS/T below. */
 	context->CurTexU0 = s / q;
@@ -526,6 +654,9 @@ void GLTexCoord4f(GLcontext context, GLfloat s, GLfloat t, GLfloat r, GLfloat q)
 
 void GLTexCoord4fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLTexCoord4f(context, v[0], v[1], v[2], v[3]);
 }
 
@@ -572,17 +703,45 @@ void GLMultiTexCoord2fARB(GLcontext context, GLenum unit, GLfloat s, GLfloat t)
 
 void GLMultiTexCoord2fvARB(GLcontext context, GLenum unit, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLMultiTexCoord2fARB(context, unit, v[0], v[1]);
 }
 
 void GLVertex4f(GLcontext context, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 {
+	/*
+	 * BOUND CHECK, and it is worth the one compare per vertex. Without it this
+	 * function wrote MGLVertex[VertexBufferPointer] and incremented
+	 * unconditionally, so a glBegin/glEnd block longer than the buffer walked
+	 * straight off the end of a malloc'd allocation: at the 256-entry default
+	 * that is 23,552 bytes, and a 64x64 quad mesh is 15,876 vertices x 92 =
+	 * 1,460,592 bytes, a 1.44 MB overrun with no diagnostic.
+	 *
+	 * The cost is one compare against a context field and a not-taken branch,
+	 * against the thirteen float stores this function already performs per
+	 * vertex. An application whose block is too large now loses the vertices
+	 * past the limit and gets an error it can read, instead of destroying the
+	 * heap. The fix for such an application is mglChooseVertexBufferSize.
+	 *
+	 * GL_OUT_OF_MEMORY is the honest code: this is an implementation memory
+	 * limit, not a misuse of the API.
+	 */
+	MGLVertex *tv;
+
+	if (context->VertexBufferPointer >= context->VertexBufferSize)
+	{
+		GLFlagError(context, 1, GL_OUT_OF_MEMORY);
+		return;
+	}
+
 	/* The slot, computed once. As a macro over the context, every store
 	 * below would re-derive VertexBuffer + VertexBufferPointer * 92: under
 	 * -fno-strict-aliasing GCC cannot assume a float store leaves either field
 	 * alone. VertexBuffer is a separate allocation, so storing through the
 	 * slot cannot change them. */
-	MGLVertex *tv = &context->VertexBuffer[context->VertexBufferPointer];
+	tv = &context->VertexBuffer[context->VertexBufferPointer];
 	#define thisvertex (*tv)
 
 	/* Stamp .color for EVERY vertex, not just under GL_SMOOTH as the
@@ -609,10 +768,9 @@ void GLVertex4f(GLcontext context, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 	thisvertex.v.u1 = context->CurTexU1;
 	thisvertex.v.v1 = context->CurTexV1;
 
-	/* .bx/.by/.bz/.bw are not written: nothing reachable reads them. Their
-	 * readers are the CPU clipper (hclip.c/aclip.c, v_Transform,
-	 * d_ConservativeDecideFrontface), which has no callers; reviving it needs
-	 * these four stores back. */
+	/* .bx/.by/.bz/.bw are not written: the CPU clipping path (hclip.c/aclip.c,
+	 * v_Transform) is what reads them, so enabling it needs these four stores
+	 * back. */
 
 	/* Raw object-space position, what draw.c feeds the vertex shaders --
 	 * see this file's header comment. */
@@ -629,11 +787,17 @@ void GLVertex4f(GLcontext context, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 
 void GLVertex4fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLVertex4f(context, v[0], v[1], v[2], v[3]);
 }
 
 void GLVertex3fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLVertex4f(context, v[0], v[1], v[2], 1.0f);
 }
 
@@ -644,6 +808,9 @@ void GLVertex2f(GLcontext context, GLfloat x, GLfloat y)
 
 void GLVertex2fv(GLcontext context, GLfloat *v)
 {
+	if (v == NULL)
+		return;
+
 	GLVertex4f(context, v[0], v[1], 0.0f, 1.0f);
 }
 

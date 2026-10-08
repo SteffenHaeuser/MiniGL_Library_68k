@@ -2,9 +2,9 @@
 # minigl-shared-library links into minigl.library (installed there as
 # third_party/pistorm3d/libminiglv3d.a).
 #
-# This is MiniGLV3D/build_lib_gcc_nolog.sh as a Makefile: the same 27 sources,
+# This is MiniGLV3D/build_lib_gcc_nolog.sh as a Makefile: the same 29 sources,
 # the same flags per group, the same archive member order, the same toolchain.
-# The tree holds only the files that build reads -- 27 .c and 25 .h, the list
+# The tree holds only the files that build reads -- 29 .c and 26 .h, the list
 # gcc -MM gives for the script's own compile commands -- as committed in the
 # MiniGLV3D git.
 #
@@ -19,7 +19,7 @@
 # object's -o argument, VERBATIM, into the object as its HUNK_UNIT name (the
 # first bytes of the .o). build_lib_gcc_nolog.sh passes an ABSOLUTE -o,
 # /mnt/d/v3d_driver/MiniGLV3D/obj_lib_gcc_nolog/<f>.o, so its archive carries
-# that path 27 times, where this one carries obj_lib_gcc_nolog/<f>.o.
+# that path 29 times, where this one carries obj_lib_gcc_nolog/<f>.o.
 # Everything after the unit name is identical. To reproduce the script's
 # archive byte for byte, give it the script's object directory:
 #     make -C <this directory> -B OBJDIR=/mnt/d/v3d_driver/MiniGLV3D/obj_lib_gcc_nolog
@@ -46,14 +46,22 @@ export PATH := $(PREFIX)/bin:$(PATH)
 # -fno-builtin-cos/-sin stops GCC fusing cos+sin into a cexp() nothing provides.
 OPT       ?= -O2
 OPTCFLAGS := -fno-strict-aliasing -fno-builtin-cos -fno-builtin-sin -finline-functions -DMGLV3D_NO_LOGGING
+
+# The script stamps its build number into others.c's GL_RENDERER string.
+# Unset here, so a plain build reports b0; set it to the reference build's
+# number to compare archives: make BUILDNUM=300.
+BUILDNUM ?=
+ifneq ($(strip $(BUILDNUM)),)
+OPTCFLAGS += -DMGLV3D_BUILD_NUMBER=$(BUILDNUM)
+endif
 CPUFLAGS  := -mcpu=68020 -m68881 -mcrt=clib2
 INCFLAGS  := -Igl/include -Ibackend/include
 
 OBJDIR ?= obj_lib_gcc_nolog
 LIB    ?= libminiglv3d.a
 
-GL_SRC   := aclip context draw fog glu hclip init matrix others texture \
-            vertexarray vertexbuffer_min vertexelements viewport
+GL_SRC   := aclip context dlist draw fog glu glut glutshapes hclip init \
+            light matrix others texture vertexarray vertexbuffer_min vertexelements viewport
 HW_SRC   := v3d_assembler v3d_clbuf v3d_commands v3d_context v3d_device v3d_frame v3d_hw \
             v3d_mem_allocvec v3d_submit_timeout v3d_texture
 

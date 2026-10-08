@@ -3,15 +3,15 @@
  */
 
 /*
- * Migrated from PoC/v3d_commands.c. The PoC functions include the CLE
- * packet writers for the ~37 struct types PoC/v3d_v3d.h's author manually
+ * Migrated from an earlier library by the same author. Its functions include
+ * the CLE packet writers for the ~37 struct types the author manually
  * verified for the big-endian 68k/little-endian V3D mismatch. DepthOffset,
  * BlendEnables, BlendCfg, NumberOfLayers, IndexedPrimList, IndexBufferSetup
- * and LoadTileBufferGeneral have no PoC counterpart. Every
- * byte-manipulation "swivel"/reorder hack in the PoC functions (the
+ * and LoadTileBufferGeneral have no the earlier library counterpart. Every
+ * byte-manipulation "swivel"/reorder hack in those functions (the
  * `swivelNN[...]` blocks, the TileCoordinates/MulticoreRenderingSupertileCFG
- * byte swaps) is kept EXACTLY as in PoC -- these are the hand-tuning this
- * file is built on, not incidental code to "clean up".
+ * byte swaps) is kept EXACTLY as in the earlier library -- these are the
+ * hand-tuning this file is built on, not incidental code to "clean up".
  */
 
 #include <stdarg.h>
@@ -255,8 +255,14 @@ void ClipperXYScaling(V3DContext* context, UWORD width, UWORD height)
     V3D_BUFFER_ALLOC_OPERATION(buffer, v3d_OP_CLIPPER_XY_SCALING,
                                v3d_clipper_xy_scaling, clipperXYScaling);
 
-    swap_float32_into(&clipperXYScaling->viewport_half_width_in_1_256th_of_pixel, (width / 2) * 256.f);
-    swap_float32_into(&clipperXYScaling->viewport_half_height_in_1_256th_of_pixel, (height / 2) * -256.f);
+    /* Halve in FLOAT, not integer. width/height arrive as the viewport extent
+     * doubled and truncated (d_ClipRectCompute, draw.c), so an ODD extent made
+     * (2N+1)/2 == N here while the vertex shader kept scaling X by the exact
+     * scale_p uniform -- clipper and rasterizer then half a pixel apart at the
+     * viewport edge. Even extents are unaffected, which is why no game has
+     * shown it. */
+    swap_float32_into(&clipperXYScaling->viewport_half_width_in_1_256th_of_pixel, (width * 0.5f) * 256.f);
+    swap_float32_into(&clipperXYScaling->viewport_half_height_in_1_256th_of_pixel, (height * 0.5f) * -256.f);
 }
 
 //***************************************************************************
@@ -479,10 +485,10 @@ void VertexArrayPrims(V3DContext* context, UBYTE mode, ULONG length, ULONG index
 //***************************************************************************
 
 /*
- * IndexedPrimList has no PoC precedent -- PoC never drew indexed
- * geometry. See v3d_hw.h's comment on the struct itself for the MESA
- * cross-check and why length+enable_primitive_restarts is a hand-packed
- * plain field rather than a compiler bitfield.
+ * IndexedPrimList has no the earlier library precedent -- the earlier library never
+ * drew indexed geometry. See v3d_hw.h's comment on the struct itself for
+ * the MESA cross-check and why length+enable_primitive_restarts is a
+ * hand-packed plain field rather than a compiler bitfield.
  */
 void IndexedPrimList(V3DContext* context, UBYTE mode, UBYTE indexType, ULONG length, BOOL enablePrimitiveRestarts, ULONG indexOffset)
 {
@@ -503,7 +509,7 @@ void IndexedPrimList(V3DContext* context, UBYTE mode, UBYTE indexType, ULONG len
 //***************************************************************************
 
 /*
- * No PoC precedent. Must be emitted before IndexedPrimList
+ * No the earlier library precedent. Must be emitted before IndexedPrimList
  * -- MESA (v3dx_draw.c) always emits INDEX_BUFFER_SETUP first, and
  * IndexedPrimList's index_offset is a byte offset INTO this bound buffer,
  * not an absolute address.

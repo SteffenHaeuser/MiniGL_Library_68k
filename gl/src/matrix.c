@@ -19,6 +19,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
+/* E() and D(): the driver's diagnostic channel, kprintf-backed. */
+#include "../../backend/hw/v3d_debug.h"
+
 #ifndef PI
 	#ifdef M_PI
 	#define PI M_PI
@@ -31,7 +34,6 @@
 #warning "Compiling without transformation pipeline. Only flat geometry supported"
 #endif
 
-static char rcsid[] = "$Id: draw.c,v 1.4 2001/02/01 14:36:49 tfrieden Exp $";
 
 typedef void (*Multfn)(struct Matrix_t *, float *, struct Matrix_t *);
 
@@ -1722,17 +1724,17 @@ void m_CombineMatrices(GLcontext context)
 
 void m_PrintMatrix(Matrix *pA)
 {
-#ifndef NDEBUG
+#ifdef DEBUG
    #define a(x) (pA->v[OF_##x])
-   printf("Matrix at 0x%lX\n", (ULONG)pA);
-   printf("    | %3.6f %3.6f %3.6f %3.6f |\n",
-      a(11), a(12), a(13), a(14));
-   printf("    | %3.6f %3.6f %3.6f %3.6f |\n",
-      a(21), a(22), a(23), a(24));
-   printf("A = | %3.6f %3.6f %3.6f %3.6f |\n",
-      a(31), a(32), a(33), a(34));
-   printf("    | %3.6f %3.6f %3.6f %3.6f |\n",
-      a(41), a(42), a(43), a(44));
+   D(("Matrix at 0x%lX\n", (ULONG)pA));
+   D(("    | %3.6f %3.6f %3.6f %3.6f |\n",
+      a(11), a(12), a(13), a(14)));
+   D(("    | %3.6f %3.6f %3.6f %3.6f |\n",
+      a(21), a(22), a(23), a(24)));
+   D(("A = | %3.6f %3.6f %3.6f %3.6f |\n",
+      a(31), a(32), a(33), a(34)));
+   D(("    | %3.6f %3.6f %3.6f %3.6f |\n",
+      a(41), a(42), a(43), a(44)));
    #undef a
 #endif
 }
@@ -1790,52 +1792,68 @@ void GLLoadIdentity(GLcontext context)
 
 void MGLPrintMatrix(GLcontext context, int mode)
 {
-#ifndef NDEBUG
+#ifdef DEBUG
    if (mode == GL_MODELVIEW)
    {
       m_PrintMatrix(CurrentMV);
+   }
+   else if (mode == GL_TEXTURE)
+   {
+      m_PrintMatrix(CurrentT);
    }
    else
    {
       m_PrintMatrix(CurrentP);
    }
-   printf("\n");
+   D(("\n"));
 #endif
 }
 
 void MGLPrintMatrixStack(GLcontext context, int mode)
 {
-#ifndef NDEBUG
+#ifdef DEBUG
    int i;
 
-   printf("Stack Top:\n");
+   D(("Stack Top:\n"));
    MGLPrintMatrix(context, mode);
-   printf("Rest of stack:\n");
+   D(("Rest of stack:\n"));
 
    if (mode == GL_MODELVIEW) {
       if (context->ModelViewStackPointer == 0) {
-         printf("Empty\n\n\n");
+         D(("Empty\n\n\n"));
          return;
       }
       for (i=context->ModelViewStackPointer-1; i>=0; i--)
       {
-         printf("%d:\n", i);
+         D(("%d:\n", i));
          m_PrintMatrix(&(context->ModelViewStack[i]));
+      }
+   }
+   else if (mode == GL_TEXTURE)
+   {
+      if (context->TextureStackPointer == 0) {
+         D(("Empty\n\n\n"));
+         return;
+      }
+      for (i=context->TextureStackPointer-1; i>=0; i--)
+      {
+         D(("%d:\n", i));
+         m_PrintMatrix(&(context->TextureStack[i]));
       }
    }
    else
    {
       if (context->ProjectionStackPointer == 0) {
-         printf("Empty\n\n\n");
+         D(("Empty\n\n\n"));
          return;
       }
       for (i=context->ProjectionStackPointer-1; i>=0; i--)
       {
-         printf("%d:\n", i);
+         D(("%d:\n", i));
          m_PrintMatrix(&(context->ProjectionStack[i]));
       }
    }
-   printf("\n\n");
+   D(("\n\n"));
 #endif
 }
 
@@ -1867,8 +1885,31 @@ void GLPushMatrix(GLcontext context)
    GLASSERT(context->ModelViewStackPointer  <= MODELVIEW_STACK_SIZE);
    if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
 
+   /*
+    * ALL THREE ARMS BOUND-CHECK. The two GLASSERTs above are no protection
+    * because they compile out of a release build. GLPopMatrix already guards
+    * all three against underflow.
+    *
+    * The risk is not theoretical. m_MatCopy writes a 72-byte matrix, so an
+    * application that leaks one glPushMatrix per frame silently writes a matrix
+    * past the end of the stack every frame from then on, marching through
+    * whatever follows it inside the GLcontext struct -- which includes
+    * CurrentDraw, a FUNCTION POINTER. Once float data lands there the pointer is
+    * non-NULL, so GLEnd's `if (context->CurrentDraw)` guard passes and the
+    * driver calls a bit pattern as an address. A client application's scene02 does exactly
+    * that: it leaks 2 modelview pushes per frame against a 40-deep
+    * stack, so it reaches the end of the stack on frame 21.
+    *
+    * GL_STACK_OVERFLOW is what the spec requires. An application that overflows
+    * renders with a stale matrix instead of taking the machine down.
+    */
    if (context->CurrentMatrixMode == GL_PROJECTION)
    {
+      if (context->ProjectionStackPointer >= PROJECTION_STACK_SIZE)
+      {
+         GLFlagError(context, 1, GL_STACK_OVERFLOW);
+         return;
+      }
       m_MatCopy(&(context->ProjectionStack[context->ProjectionStackPointer]),
          CurrentP);
       context->ProjectionStackPointer ++;
@@ -1886,6 +1927,11 @@ void GLPushMatrix(GLcontext context)
    }
    else
    {
+      if (context->ModelViewStackPointer >= MODELVIEW_STACK_SIZE)
+      {
+         GLFlagError(context, 1, GL_STACK_OVERFLOW);
+         return;
+      }
       m_MatCopy(&(context->ModelViewStack[context->ModelViewStackPointer]),
          CurrentMV);
       context->ModelViewStackPointer ++;
@@ -1952,14 +1998,20 @@ layout:
 */
 
    float v[16];
-   float n2 = 2.0*zNear;
-   float rli = 1.f / (float)(right-left);
-   float tbi = 1.f / (float)(top-bottom);
-   float fni = 1.f / (float)(zFar-zNear);
+   float n2, rli, tbi, fni;
 
    GLASSERT(context != NULL);
    if (zFar <= 0.0 || zNear <= 0.0) { GLFlagError(context, 1, GL_INVALID_VALUE); return; }
    if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
+
+   /* COMPUTED AFTER THE GUARDS, not in the declarations: a rejected call must
+    * not divide, and these three divide by the three extents. gluPerspective
+    * keeps a degenerate aspect or depth range from reaching here at all, but
+    * glFrustum is a published entry point the games call directly. */
+   n2  = 2.0*zNear;
+   rli = 1.f / (float)(right-left);
+   tbi = 1.f / (float)(top-bottom);
+   fni = 1.f / (float)(zFar-zNear);
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
 
@@ -2189,6 +2241,19 @@ x 0 x 0
 
    GLASSERT(context != NULL);
    if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
+
+   /* Only the three single-axis selectors exist. gl.h also defines the combined
+    * GLROT_011/101/110/111, which without this check fall into the GLROT_100
+    * arm and then reach m_Mult as a matrix-type flag it does not know -- an x
+    * rotation concatenated under the wrong fast path, with no error. Refused
+    * before the cached-state invalidation below, so a rejected call changes
+    * nothing. */
+   if (xyz != GLROT_001 && xyz != GLROT_010 && xyz != GLROT_100)
+   {
+      GLFlagError(context, 1, GL_INVALID_ENUM);
+      return;
+   }
+
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
 
@@ -2228,7 +2293,7 @@ else if (xyz == GLROT_010)
    v(33) = c;
 
 }
-else //GLROT_100
+else /* GLROT_100, the only selector left -- validated above */
 {
    v(11) = 1.f;
    v(12) = 0.f;
@@ -2274,9 +2339,31 @@ x 0 x 0
 
 */
 float v[16];
+float q;
 
    GLASSERT(context != NULL);
    if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
+
+   /* Same three selectors as glRotatefEXT, and the same reason. */
+   if (xyz != GLROT_001 && xyz != GLROT_010 && xyz != GLROT_100)
+   {
+      GLFlagError(context, 1, GL_INVALID_ENUM);
+      return;
+   }
+
+   /* The caller supplies the sine and cosine itself, and the matrix is then
+    * tagged with `xyz` as a PURE ROTATION: m_Mult takes the rotation fast path
+    * and the normal transform assumes it is orthonormal. A pair that is not a
+    * real angle builds a scale wearing a rotation's flag, which both of those
+    * then believe. The tolerance is wide -- a genuine float sine/cosine pair is
+    * out by about 1e-7, so this catches mistakes, not rounding. */
+   q = sin_an * sin_an + cos_an * cos_an;
+   if (q < 0.99f || q > 1.01f)
+   {
+      GLFlagError(context, 1, GL_INVALID_VALUE);
+      return;
+   }
+
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
 
@@ -2312,7 +2399,7 @@ else if (xyz == GLROT_010)
    v(32) = 0.f;
    v(33) = cos_an;
 }
-else //GLROT_100
+else /* GLROT_100, the only selector left -- validated above */
 {
    v(11) = 1.f;
    v(12) = 0.f;
@@ -2334,6 +2421,12 @@ void GLScaled(GLcontext context, GLdouble x, GLdouble y, GLdouble z)
 {
    float v[16];
    GLASSERT(context!=NULL);
+   /* The guard its twelve sibling matrix calls already have. Without it this
+    * function, GLScalef, GLTranslated and GLTranslatef are the only matrix
+    * calls that silently take effect inside a glBegin block instead of being
+    * refused. GLScalef forwards here, so this one guard covers both scale
+    * entry points in both the static and the shared-library build. */
+   if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
    #define v(x) (v[OF_##x])
@@ -2357,40 +2450,23 @@ void GLScaled(GLcontext context, GLdouble x, GLdouble y, GLdouble z)
    #undef v
 }
 
+/*
+ * A BARE FORWARD, deliberately, so the static and shared-library builds cannot
+ * diverge. mgl/gl.h defines glScalef to call GLScaled with its floats widened
+ * to double, so a statically linked program never enters this function at all;
+ * minigl_dispatch.h gives glScalef its own GLScalef slot, so a minigl.library
+ * program only enters here. Two separate bodies would therefore mean one is
+ * dead in each build, and a fix landing in one would be untested in the other.
+ * Of the five float/double matrix pairs glScalef is the only one gl.h collapses
+ * this way; the rest already reach their own function in both builds.
+ *
+ * The widening is exact: every GLfloat is representable as a GLdouble, and
+ * GLScaled's `(float)x` narrows it back to the same bits. No rounding either
+ * way, so the two routes agree to the bit as well as in behaviour.
+ */
 void GLScalef(GLcontext context, GLfloat x, GLfloat y, GLfloat z)
 {
-
-/*
-layout:
-x 0 0 0
-0 y 0 0
-0 0 z 0
-0 0 0 1
-*/
-
-   float v[16];
-   GLASSERT(context!=NULL);
-   context->InvRotValid = GL_FALSE;
-   context->CombinedValid = GL_FALSE;
-   #define v(x) (v[OF_##x])
-   v(11) = x;
-
-   v(12) = 0.0; v(13) = 0.0; v(14) = 0.0;
-   v(21) = 0.0;
-
-   v(22) = y;
-
-   v(23) = 0.0; v(24) = 0.0;
-   v(31) = 0.0; v(32) = 0.0;
-
-   v(33) = z;
-
-   v(34) = 0.0;
-   v(41) = 0.0; v(42) = 0.0; v(43) = 0.0; v(44) = 1.0;
-
-   m_Mult(CMATRIX(context), v, MGLMAT_GENERAL_SCALE, OMATRIX(context));
-   SMATRIX(context);
-   #undef v
+   GLScaled(context, (GLdouble)x, (GLdouble)y, (GLdouble)z);
 }
 
 void GLTranslated(GLcontext context, GLdouble x, GLdouble y, GLdouble z)
@@ -2398,6 +2474,8 @@ void GLTranslated(GLcontext context, GLdouble x, GLdouble y, GLdouble z)
    float v[16];
 
    GLASSERT(context != NULL);
+   /* See glScaled: the same guard. */
+   if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
 
@@ -2426,6 +2504,8 @@ layout:
    float vv[16];
 
    GLASSERT(context != NULL);
+   /* See glScaled: the same guard. */
+   if (context->CurrentPrimitive != GL_BASE) { GLFlagError(context, 1, GL_INVALID_OPERATION); return; }
    context->InvRotValid = GL_FALSE;
    context->CombinedValid = GL_FALSE;
 

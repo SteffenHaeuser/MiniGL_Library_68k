@@ -3,12 +3,13 @@
  */
 
 /*
- * Migrated from PoC/v3d_v3d.c (mailbox/init/mem-alloc layer). These
- * functions use none of RPIV3D's Library/W3D_Driver fields, only sysbase/
- * dosbase/BytesAllocated/deviceInfo -- so RPIV3D* becomes V3DDevice*
- * throughout (see v3d_device.h for why). SysBase and DOSBase are declared
- * as locals from device->sysbase/device->dosbase, keeping the exact
- * `SysBase`/`DOSBase` variable names the inline library-call stubs require.
+ * Migrated from an earlier library by the same author (mailbox/init/mem-alloc
+ * layer). These functions use none of the earlier library's Library/W3D_Driver
+ * fields, only sysbase/dosbase/BytesAllocated/deviceInfo -- so its device
+ * pointer becomes V3DDevice* throughout (see v3d_device.h for why).
+ * SysBase and DOSBase are declared as locals from
+ * device->sysbase/device->dosbase, keeping the exact `SysBase`/`DOSBase`
+ * variable names the inline library-call stubs require.
  */
 
 #include <stdarg.h>
@@ -55,13 +56,6 @@ int v3d_qpu_active(V3DDevice* device)
         return 1;
     wait_num = 0; /* signal completion */
     return 0;
-}
-
-static void ZeroMem(void* d, ULONG sz)
-{
-    UBYTE* dst = d;
-    while (sz--)
-        *dst++ = 0;
 }
 
 static uint32_t mbox_recv(void)
@@ -145,28 +139,6 @@ static unsigned fwRev(V3DDevice* device)
     return LE32(p[5]);
 }
 
-static unsigned mbpowerV3D(V3DDevice* device, unsigned tagid, unsigned domain, unsigned state)
-{
-    int i=0;
-    uint32_t* p = MBReq;
-
-    p[i++] = 0;
-    p[i++] = 0;
-
-    p[i++] = LE32(tagid);
-    p[i++] = LE32(8);
-    p[i++] = 0;
-    p[i++] = LE32(domain);
-    p[i++] = LE32(state);
-
-    p[i++] = 0;
-    p[0] = LE32(i*sizeof *p);
-
-    if (mbox_transaction(device, p))
-        return -1;
-    return LE32(p[6]);
-}
-
 /*
  * AllocVec (backend/hw/v3d_mem_allocvec.c) is v3d_mem_alloc/v3d_mem_free's
  * DEFAULT implementation, in place of the RPi mailbox's GPU-memory
@@ -186,6 +158,16 @@ static unsigned mbpowerV3D(V3DDevice* device, unsigned tagid, unsigned domain, u
  * either way.
  */
 #ifdef V3D_MEM_USE_MAILBOX
+
+/* Only v3d_mem_alloc/v3d_mem_free below clear a v3d_mem, and both are
+ * mailbox-only, so this lives in here with them. The file uses no memset and
+ * includes no <string.h>; a byte loop keeps it that way. */
+static void ZeroMem(void* d, ULONG sz)
+{
+    UBYTE* dst = d;
+    while (sz--)
+        *dst++ = 0;
+}
 
 static unsigned mem_alloc(V3DDevice* device, unsigned size, unsigned align, unsigned flags)
 {
@@ -298,7 +280,7 @@ void v3d_read_info(V3DDevice* device)
     should be searched for in the parent. The process repeats recursively until either root key is found
     or the property is found, whichever occurs first
 */
-static CONST_APTR GetPropValueRecursive(APTR key, CONST_STRPTR property)
+static CONST_APTR GetPropValueRecursive(APTR key, const char* property)
 {
     do {
         APTR prop = DT_FindProperty(key, property);

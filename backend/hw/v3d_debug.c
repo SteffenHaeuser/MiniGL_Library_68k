@@ -3,9 +3,9 @@
  */
 
 /*
- * From PoC/v3d_debug.c. Provides kprintf() for the D()/E() macros in
- * v3d_debug.h. Warp3D-free, generic AmigaOS debug-print helper (RawDoFmt
- * to the debug serial output).
+ * From an earlier library by the same author. Provides kprintf() for the
+ * D()/E() macros in v3d_debug.h. Warp3D-free, generic AmigaOS debug-print
+ * helper (RawDoFmt to the debug serial output).
  */
 
 #ifdef DEBUG
@@ -28,14 +28,14 @@ void DPutChProc(MGLV3D_REG(d0, UBYTE mychar), MGLV3D_REG(a3, APTR PutChData))
     return;
 }
 
-void kprintf(STRPTR format, ...)
+void kprintf(const char* format, ...)
 {
     if (format)
     {
         struct ExecBase* SysBase = *(struct ExecBase **)4L;
         va_list args;
         va_start(args, format);
-        RawDoFmt(format, (APTR)args, (void (*)())&DPutChProc, (APTR)SysBase);
+        RawDoFmt((STRPTR)format, (APTR)args, (void (*)())&DPutChProc, (APTR)SysBase);
         va_end(args);
     }
     return;

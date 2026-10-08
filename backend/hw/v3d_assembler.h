@@ -87,7 +87,7 @@ typedef unsigned int v3d_uint32;
 typedef unsigned long long v3d_uint64;
 typedef int v3d_int32;
 typedef char v3d_bool;
-void kprintf(STRPTR format, ...);
+void kprintf(const char* format, ...);   /* must match v3d_debug.h */
 #define E(x) do { kprintf x; } while (0)
 
 //
@@ -4950,11 +4950,16 @@ static enum v3d_qpu_assemble_raddr_result v3d33_qpu_assemble_raddr(struct v3d_qp
 			}
 			else
 			{
+				/* raddr_b can be shared only when it already holds this same
+				 * REGISTER. sig.small_imm_b set means it holds a small
+				 * immediate instead, and one bit cannot mean both, so a
+				 * register can never share it -- even when the immediate's
+				 * packed index happens to equal this register's number. */
 				if ((instr->instr.alu.add.a.input.mux == V3D_QPU_MUX_B ||
 				     instr->instr.alu.add.b.input.mux == V3D_QPU_MUX_B ||
 				     instr->instr.alu.mul.a.input.mux == V3D_QPU_MUX_B ||
 				     instr->instr.alu.mul.b.input.mux == V3D_QPU_MUX_B) &&
-				    instr->raddr_b != desiredOperand)
+				    (instr->sig.small_imm_b || instr->raddr_b != desiredOperand))
 					return v3d_qpu_assemble_raddr_result_no_raddr_space;
 
 				*mux = V3D_QPU_MUX_B;
@@ -4992,14 +4997,19 @@ static enum v3d_qpu_assemble_raddr_result v3d33_qpu_assemble_raddr(struct v3d_qp
 		// Small immediate must occupy raddr_b
 		if (instr->instr.alu.add.a.input.mux == V3D_QPU_MUX_B || instr->instr.alu.add.b.input.mux == V3D_QPU_MUX_B ||
 		    instr->instr.alu.mul.a.input.mux == V3D_QPU_MUX_B || instr->instr.alu.mul.b.input.mux == V3D_QPU_MUX_B)
-            {
-                if (instr->raddr_b = desiredOperand) //start debugdebug
-                {
-                    *mux = V3D_QPU_MUX_B;
-                    return v3d_qpu_assemble_raddr_result_success;
-                }                                    //end debugdebug
+		{
+			/* Share raddr_b only when it already holds this SAME immediate, as
+			 * `or rf3, 0x3f800000, 0x3f800000` does -- sig.small_imm_b is
+			 * already set by the first operand, so neither it nor raddr_b
+			 * needs writing again. A register there, or a different immediate,
+			 * cannot be shared: raddr_b is one field and small_imm_b one bit. */
+			if (instr->sig.small_imm_b && instr->raddr_b == desiredOperand)
+			{
+				*mux = V3D_QPU_MUX_B;
+				return v3d_qpu_assemble_raddr_result_success;
+			}
 			return v3d_qpu_assemble_raddr_result_no_raddr_space_too_many_immediates;
-            }
+		}
 		*mux = V3D_QPU_MUX_B;
 		instr->raddr_b = desiredOperand;
 		instr->sig.small_imm_b = 1;

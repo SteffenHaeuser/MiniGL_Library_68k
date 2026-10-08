@@ -43,7 +43,6 @@
 
 #include "sysinc.h"
 
-static char rcsid[] = "$Id: fog.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
 void GLFogf(GLcontext context, GLenum pname, GLfloat param)
 {
@@ -143,10 +142,16 @@ void GLFogfv(GLcontext context, GLenum pname, GLfloat *param)
 		case GL_FOG_INDEX:
 			GLFlagError(context, 1, GL_INVALID_ENUM);
 			break;
+		/* FOUR components, as GL defines the fog colour: RGBA. The alpha is
+		 * stored and nothing reads it -- GL 1.1's fog blend applies to R, G
+		 * and B only -- so it exists for the query to answer. Callers must
+		 * pass four floats; three was tolerated for as long as nothing read
+		 * the fourth. */
 		case GL_FOG_COLOR:
 			context->backend.fog_r = fog_ClampToByte(*param);
 			context->backend.fog_g = fog_ClampToByte(*(param+1));
 			context->backend.fog_b = fog_ClampToByte(*(param+2));
+			context->backend.fog_a = fog_ClampToByte(*(param+3));
 			break;
 		default:
 			GLFlagError(context, 1, GL_INVALID_ENUM);

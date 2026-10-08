@@ -6,12 +6,12 @@
  * V3DTexture's alloc/upload/emit-state implementation: tiling layout, the
  * mip chain, the texture shader/sampler state records, and the renaming and
  * parking of texture memory that a binned draw may still name.
- * v3d_texture_alloc/v3d_texture_upload_rgba8 follow the PoC's texture setup
- * (PoC/v3d_cle.c: v3d_mem_alloc with +256 slack, V3D_ALIGN_UP to 256,
- * v3d_store_tiled_image); the tiling-format choice is MESA's, below, not
- * the PoC's "width > 128 -> XOR" rule.
+ * v3d_texture_alloc/v3d_texture_upload_rgba8 follow the texture setup of
+ * an earlier library by the same author (v3d_mem_alloc with +256 slack,
+ * V3D_ALIGN_UP to 256, v3d_store_tiled_image); the tiling-format choice is
+ * MESA's, below, not the earlier library's "width > 128 -> XOR" rule.
  *
- * v3d_texture_convert_row is ported from PoC/v3d_texture.c's
+ * v3d_texture_convert_row is ported from the earlier library's
  * ConvertTexRow (W3D_* format constants swapped for this file's
  * backend-local V3D_SRCFMT_* -- backend/ must not depend on Warp3D
  * types, same reasoning v3d_texture.h's own comments give for not
@@ -439,8 +439,35 @@ void v3d_texture_free(V3DDevice* device, V3DTexture* tex)
  * THE POOL MUST NOT BE SMALLER THAN THE PARK LIST. A smaller pool throws every
  * drained block past its capacity at FreeVec and makes the next frame
  * re-AllocVec it -- with MEMF_REVERSE (a last-fit scan) and MEMF_CLEAR zeroing
- * a block about to be overwritten. Keep them equal. */
-#define V3D_TEX_PARK_MAX 512
+ * a block about to be overwritten. Keep them equal.
+ *
+ * 4096, A BOUND THAT CAN BE STATED. The list only accumulates between presents
+ * -- gl_FramePresent marks every parked block submitted and the next successful
+ * wait drains them -- so what matters is the most that can be parked in ONE
+ * frame. For DELETES that is bounded: a texture is deleted once, so at most
+ * textureObjectCount-1 of them, 4095 at the default name table. A whole level
+ * teardown in a single frame fits exactly, which is the reachable case.
+ *
+ * RENAMES are not bounded that way (one texture can be renamed repeatedly), so
+ * the list can still fill -- but a rename that cannot park fails SAFE: the
+ * caller falls back to a synchronous pass split, slow and correct.
+ * glDeleteTextures leaks a block it cannot park rather than freeing it.
+ *
+ * MEMORY COST: s_park 69,632 bytes and s_pool 65,536, so 135,168 together --
+ * essentially all of this object's BSS, and the library's BSS total is 345,632
+ * bytes. That makes them the largest BSS consumer in the driver by a wide
+ * margin; the next is unpackedInstructions at 22KB.
+ *
+ * AND NO FRAME TIME COST. The client applications are the heaviest rename
+ * workloads there are -- the live renderers with the most per-frame
+ * uploads -- so the deeper tail of tex_pool_alloc's linear scan is simply
+ * never reached. The scan is O(pool depth) per rename and the pool fills to
+ * roughly the renames in a frame, so it is quadratic in that count; no live
+ * game gets near the deep end. g_mglv3d_texture_rename_fails leaving 0 is
+ * what keeps that true: if it ever moves, bucket this pool by size the way
+ * MESA's v3d_bo_cache does (size_list[] indexed by size/4096) instead of
+ * tuning the cap. */
+#define V3D_TEX_PARK_MAX 4096
 #define V3D_TEX_POOL_MAX V3D_TEX_PARK_MAX
 
 typedef struct {
@@ -472,6 +499,12 @@ int g_mglv3d_texture_renames = 0;
  * a healthy machine; a non-zero value is the signal to raise V3D_TEX_PARK_MAX
  * rather than to go looking for a rendering bug. */
 int g_mglv3d_texture_rename_fails = 0;
+
+/* Times glDeleteTextures could not park a block even after flushing the render
+ * in flight, and therefore LEAKED it rather than freeing memory a draw already
+ * binned this frame will name. Should be 0 on any real workload: reaching it
+ * needs more than V3D_TEX_PARK_MAX parks between two presents. */
+int g_mglv3d_texture_park_overflows = 0;
 
 static int tex_pool_alloc(V3DDevice* device, v3d_mem* out, v3d_u32 size)
 {
@@ -856,7 +889,7 @@ void v3d_texture_emit_state(V3DDevice* device, V3DContext* context, V3DTexture* 
     UBYTE temp;
     UBYTE minFilterNearest, magFilterNearest;
 
-    /* Texture shader state (PoC v3d_cle.c:836-873). */
+    /* Texture shader state (from an earlier library by the same author). */
     /* Address is captured from the pointer the claim actually returns,
      * AFTER the claim -- not via CurrentBufferAddress() before it. If
      * THIS claim is what triggers state_buf to grow, the real data lands
@@ -933,8 +966,8 @@ void v3d_texture_emit_state(V3DDevice* device, V3DContext* context, V3DTexture* 
     swivel[3] = LE32(swivel[3]);
     swivel[4] = LE32(swivel[4]);
 
-    /* Sampler state (PoC v3d_cle.c:874-890). filter/wrap taken from the
-     * V3DTexture object instead of hardcoded.
+    /* Sampler state (from an earlier library by the same author). filter/wrap
+     * taken from the V3DTexture object instead of hardcoded.
      *
      * A *_MIPMAP min filter keeps its within-level filter: the test must
      * accept V3D_TEXFILTER_LINEAR_MIPMAP as well as V3D_TEXFILTER_LINEAR,

@@ -22,11 +22,10 @@
 #define V3D_CTL_INT_STS *(volatile uint32_t*)(V3D_BASE+0x00050)
 #define V3D_CTL_INT_CLR *(volatile uint32_t*)(V3D_BASE+0x00058)
 
-/* Bits within V3D_CTL_INT_STS/CLR -- from PoC/linuxregs.c:239-248 (Linux kernel v3d driver register
- * header; its INT_STS/CLR offsets match this file's, 0x50/0x58 off V3D_BASE). Bit order per the Linux
+/* Bits within V3D_CTL_INT_STS/CLR. Bit order per the Linux
  * DRM v3d register header (drivers/gpu/drm/v3d/v3d_regs.h, rpi-6.6.y -- the V3D 4.x driver, NOT vc4):
  * FRDONE 0, FLDONE 1, OUTOMEM 2, SPILLUSE 3, TRFB 4, GMPV 5, PCTR 6, CSDDONE 7, QPU_MASK 27:16.
- * Add others from linuxregs.c as needed, don't guess. */
+ * Add others from that header as needed, don't guess. */
 #define V3D_INT_FRDONE  0x00000001 /* BIT(0) -- render (frame) done */
 #define V3D_INT_FLDONE  0x00000002 /* BIT(1) -- binning (frame list) done */
 #define V3D_INT_OUTOMEM 0x00000004 /* BIT(2) -- binner ran out of tile allocation memory; see the spill handling in v3d_wait_binning_timeout (v3d_submit_timeout.c) */
@@ -55,7 +54,7 @@
 /* Pre-swapped for the PiStorm bridge: register writes go from the 68k
  * big-endian CPU to the little-endian V3D/ARM side, and v3d_hw.c writes
  * V3D_L2TCACTL without LE32, so 0x01000000 lands as bit 0 (L2TFLS in
- * PoC/linuxregs.c's register layout). This value is right as written; do
+ * the Linux DRM v3d register layout). This value is right as written; do
  * not change it to (1<<0) -- with 0x00000001 textures do not show up at
  * all. */
 #define V3D_L2TCACTL_L2TFLS      0x01000000

@@ -25,7 +25,8 @@
  * v3d_cl_reset takes both *mem and *buf (not just *buf) because it must
  * restore buf->capacity from mem->size, not just reset buf->used to 0.
  *
- * AlignBuffer (v3d_commands.c, originally ported verbatim from the PoC)
+ * AlignBuffer (v3d_commands.c, originally ported verbatim from
+ * the earlier library)
  * must only advance buffer->used, like v3d_buffer_align, and never touch
  * capacity: a shrinking capacity makes v3d_cl_claim_grow's capacity check
  * fail and reallocate a buffer that did not need to grow.
@@ -41,7 +42,7 @@
  * corrupting whatever now occupied it.
  */
 
-/* Claims `size` bytes from *buf (backed by *mem), growing *mem/*buf first if the buffer is full. Returns 0 if growth itself fails (real out-of-memory). frame is where the old block's free gets deferred to (see v3d_frame_defer_free). */
+/* Claims `size` bytes from *buf (backed by *mem), growing *mem and *buf first if the buffer is full. Returns 0 if growth itself fails (real out-of-memory). frame is where the old block's free gets deferred to (see v3d_frame_defer_free). */
 void* v3d_cl_claim_grow(V3DDevice* device, v3d_mem* mem, v3d_static_buffer* buf, v3d_uintptr size, V3DFrame* frame);
 
 /* v3d_cl_claim_grow with its fits-case inline: the same test, and the same

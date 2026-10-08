@@ -17,7 +17,6 @@
  * Copyright 2025-2026.
  */
 
-static char rcsid[] = "$Id: aclip.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
 #include "sysinc.h"
 #include <math.h>

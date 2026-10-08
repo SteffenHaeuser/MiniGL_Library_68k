@@ -8,8 +8,8 @@
 #include "v3d_types.h"
 
 /*
- * V3DDevice -- derived from RPIV3D (PoC/v3d_structs.h:49-64). It keeps
- * only the RPIV3D fields v3d_init/v3d_mem_alloc/v3d_mem_free/v3d_free/
+ * V3DDevice -- derived from an earlier library by the same author. It keeps
+ * only the fields v3d_init/v3d_mem_alloc/v3d_mem_free/v3d_free/
  * v3d_qpu_active use (sysbase, dosbase, BytesAllocated, deviceInfo). The
  * rest is not carried over; that includes the Warp3D driver registration
  * (struct Library lib, W3D_Driver driver/owndriver/end), which MiniGLV3D

@@ -2,7 +2,10 @@
  * (C) 2025-2026 Dennis van der Boon
  */
 
-void kprintf(STRPTR format, ...);
+/* const char*, not STRPTR: every caller passes a string literal, and STRPTR is
+ * unsigned char* -- which made each of those a -Wpointer-sign warning. The
+ * RawDoFmt call inside casts once instead. */
+void kprintf(const char* format, ...);
 
 #ifdef DEBUG
 #define D(x) do { kprintf x; } while (0)

@@ -19,12 +19,12 @@ typedef struct V3DContext V3DContext;
 #endif
 
 /*
- * V3DTexture -- replaces W3D_Texture / RPIV3D_Texture. RPIV3D_Texture
- * (PoC/v3d_structs.h:164) embedded "W3D_Texture w3d" as its first member
- * plus texenv/envcolor/texture_mem; that embedding is exactly the coupling
- * this struct removes -- no W3D_* type appears here. V3DTexture is the
- * object itself, created once per GL texture name and referenced across
- * many frames, not a wrapper around a W3D_Texture.
+ * V3DTexture -- replaces W3D_Texture and the texture struct of
+ * an earlier library by the same author, which embedded "W3D_Texture w3d" as
+ * its first member plus texenv/envcolor/texture_mem; that embedding is
+ * exactly the coupling this struct removes -- no W3D_* type appears here.
+ * V3DTexture is the object itself, created once per GL texture name and
+ * referenced across many frames, not a wrapper around a W3D_Texture.
  *
  * `resident`/`dirty` mirror bookkeeping bits Warp3D's own W3D_Texture
  * carried -- kept because they're generically useful (has this been
@@ -61,7 +61,7 @@ enum {
 
 /*
  * Backend-local source pixel formats for v3d_texture_convert_row --
- * mirrors PoC/v3d_texture.c's ConvertTexRow, which switched on Warp3D's
+ * mirrors the earlier library's ConvertTexRow, which switched on Warp3D's
  * W3D_* format enum (backend/ must not depend on that, same reasoning as
  * not depending on GL_* -- see the V3DTexture comment above).
  * gl/src/texture.c maps GL_UNSIGNED_BYTE/GL_RGB/GL_RGBA/etc. combinations
@@ -86,7 +86,7 @@ enum {
 #define V3D_MAX_MIP_LEVELS 13
 
 typedef struct V3DTexture {
-    struct V3DTexture* next;    /* meant as the link for V3DContext.texture_list, replacing AddTail(&context->restex,...) (PoC/v3d_texture.c:198) -- nothing links or walks that list */
+    struct V3DTexture* next;    /* meant as the link for V3DContext.texture_list, replacing the earlier library's AddTail(&context->restex,...) -- nothing links or walks that list */
 
     v3d_mem texture_mem;         /* GPU memory holding the uploaded texture data */
 
@@ -334,7 +334,7 @@ void v3d_texture_upload_rgba8_subimage(V3DDevice* device, V3DTexture* tex, v3d_u
                                         int xoffset, int yoffset, int width, int height);
 
 /*
- * Ported from PoC/v3d_texture.c's ConvertTexRow -- ARGB8/RGB8/ARGB4/
+ * Ported from the earlier library's ConvertTexRow -- ARGB8/RGB8/ARGB4/
  * ARGB1555/RGB565/LA8 (V3D_SRCFMT_*) to RGBA8, `count` pixels, into `dst`.
  * It also handles RGBA8 (a byte copy) and the one-byte L8 and A8 formats.
  * A pure data transform: no CL packet or hardware struct is involved.

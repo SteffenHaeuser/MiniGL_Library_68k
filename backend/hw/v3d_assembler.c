@@ -3,11 +3,11 @@
  */
 
 /*
- * QPU shader assembler, ported from PoC/v3d_assembler.h (a single-header
- * library -- #define V3D_ASSEMBLER_IMPLEMENTATION then #include to get the
- * implementation, matching stb-style headers). v3d_assembler.h holds that
- * header; this file is the adaptation layer PoC/v3d_assembler.c's own top
- * matter provided, rewritten for MiniGLV3D instead of RPIV3D.
+ * QPU shader assembler, ported from an earlier library by the same author
+ * (a single-header library -- #define V3D_ASSEMBLER_IMPLEMENTATION then
+ * #include to get the implementation, matching stb-style headers).
+ * v3d_assembler.h holds that header; this file is the adaptation layer
+ * the earlier library's own top matter provided, rewritten for MiniGLV3D.
  *
  * v3d_assembler.h needs two REQUIRED macros defined before inclusion:
  *  - v3d_memcmp: standard memcmp, no adaptation needed.
@@ -15,8 +15,8 @@
  *    ("// >>> qpu_disasm.c", a single call site inside `append()`) --
  *    MiniGLV3D only ever ASSEMBLES (mnemonics -> machine code), never
  *    disassembles, so that code path is dead for our purposes. Stubbed
- *    rather than porting PoC's own myvsnprintf (which used a global
- *    `RPIV3D* constbase` -- exactly the kind of global-state pattern
+ *    rather than porting the earlier library's own myvsnprintf (which used a
+ *    global library-base pointer -- exactly the kind of global-state pattern
  *    MiniGLV3D's architecture avoids; V3DDevice is always passed
  *    explicitly, never assumed via a global).
  *
@@ -24,14 +24,14 @@
  * (`struct v3d_device_info;`) and uses it via pointer (devinfo->ver
  * etc.) -- needs the FULL definition in scope before the implementation
  * block. v3d_device.h's struct v3d_device_info is field-identical to
- * PoC/v3d_structs.h's original, so including it first is sufficient --
+ * the earlier library's original, so including it first is sufficient --
  * no new struct needed.
  *
  * D macro collision: v3d_assembler.h defines its own `#define D 1 //
  * Destination` internally (a QPU opcode-encoding field constant,
  * unrelated to this codebase's D()/E() debug-print macros) -- colliding
- * with v3d_debug.h's D(x). PoC's own v3d_assembler.c handles this by NOT
- * including v3d_debug.h until AFTER the implementation block (letting
+ * with v3d_debug.h's D(x). the earlier library's own assembler handles this by
+ * NOT including v3d_debug.h until AFTER the implementation block (letting
  * v3d_assembler.h's own D win during that section, since it also
  * self-declares kprintf/E() -- see its own line ~90), then `#undef D` +
  * `#include "v3d_debug.h"` afterward to restore normal D()/E() for the
@@ -65,188 +65,12 @@ static size_t v3d_assembler_vsnprintf_stub(char* s, size_t n, const char* format
 #undef D
 #include "v3d_debug.h"
 
-/* static -- avoids colliding with a host application that defines its
- * own (non-static) byteswap64 and links into the same executable. */
-static v3d_u64 byteswap64(v3d_u64 x)
-{
-    v3d_u64 hi_lo_swapped = (x << 32) | (x >> 32);
-    v3d_u32 hi = (v3d_u32)(hi_lo_swapped >> 32);
-    v3d_u32 lo = (v3d_u32)hi_lo_swapped;
-
-    return ((v3d_u64)LE32(hi) << 32) | LE32(lo);
-}
-
 /*
- * Shader mnemonic source, copied verbatim from PoC/v3d_assembler.c
- * (lines 51-952, the ACTIVE set -- a second, disabled copy sits in a
- * permanent #if 0 block later in that file and was not carried over).
- * Same content as PoC/v3d_shaders.c's pseudocode+mnemonic form, just
- * without the register-allocation comments -- see that file for the
- * human-readable version if modifying these.
+ * Shader mnemonic source, copied verbatim from the earlier library (the ACTIVE
+ * set -- a second, disabled copy sat in a permanent #if 0 block there and
+ * was not carried over). Same content as the earlier library's
+ * pseudocode+mnemonic form, just without the register-allocation comments.
  */
-static const char* g_fragment_shader_assembly[] = {
-#if 1
-	// get the first varying, which is s/w
-	//ldvary( assembler, varying_div_w );
-	// write first texture memory unit configuration value from uniforms
-	//wrtmuc( assembler );
-
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-
-	// generate s value
-	// acc = varying_div_w[s] * w
-	//fmul( assembler, acc, varying_div_w, w );
-	// write second texture memory unit configuration value from uniforms
-	//wrtmuc( assembler );
-
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-
-	// generate output value for s
-	// s = varying_div_w[s] * w + varying_c[s]
-	//fadd( assembler, s, acc, varying_c );
-	// get next varying [t]
-	//ldvary( assembler, varying_div_w );
-
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-
-	// generate first part of t output value
-	// acc = varying_div_w[t] * w
-	//fmul( assembler, acc, varying_div_w, w );
-
-    "nop ; fmul r1, r0, rf0",
-
-	// generate output value for t
-	// t = varying_div_w[t] * w + varying_c[t]
-	//fadd( assembler, t, acc, varying_c );
-
-    "fadd rf5, r1, r5 ; nop",
-
-	// wait another instruction for value in t to take
-    "nop ; nop",
-
-	// write t value into TMU
-	//mov_addalu( assembler, rmagic(tmut), t );
-	//thrsw( assembler );
-
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-
-	// macoy version does an alu operation here and another thrsw...
-	//thrsw( assembler );
-
-    "nop ; nop ; thrsw",
-
-	// write s value into TMU
-	// this will trigger the TMU read operation
-	//mov_addalu( assembler, rmagic(tmus), s );
-	// put another thrsw in here?
-	//thrsw( assembler ); //NO?
-
-    "or tmus, rf6, rf6 ; nop", // ; thrsw",
-
-	// load the TMU results for blue and green
-	//ldtmu( assembler, blue_green );
-
-    "nop ; nop ; ldtmu.rf4",
-
-	// load tmu results for red and alpha
-	//ldtmu( assembler, red_alpha );
-
-    "nop ; nop ; ldtmu.rf3",
-
-	// unpack the read texture pixel value into components for testing
-	// then repack for tlb
-
-	// this is confirmed to perform the exact same in terms of output
-	// as just the reading from the TMU and stashing it right back
-	// into the TLB
-
-	// clear out the output values for now
-	//sub_addalu( assembler, red_out, red_out, red_out );
-	//sub_addalu( assembler, green_out, green_out, green_out );
-    //sub_addalu( assembler, blue_out, blue_out, blue_out );
-	//sub_addalu( assembler, alpha_out, alpha_out, alpha_out );
-#if 1
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-
-	// load in the pixel colors
-	//fadd( assembler, blue_out, blue_out, unpack_l(blue_green) );
-	//fadd( assembler, green_out, green_out, unpack_h(blue_green) );
-	//fadd( assembler, red_out, red_out, unpack_l(red_alpha) );
-	//fadd( assembler, alpha_out, alpha_out, unpack_h(red_alpha) );
-
-    "fadd rf7, rf7, rf4.l ; nop",  //corrected debugdebug
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-
-	// When an image looks good in the frame buffer, the colors are
-	// different when shown as a texture.
-	// red [frame buffer]   --> blue [texture]
-	// green [frame buffer] --> green [texture]
-	// blue [frame buffer]  --> red [texture]
-
-	// repack values into output pixel
-	//vfpack( assembler, rmagic(tlb), red_out, green_out );
-	//thrsw( assembler );
-	//vfpack( assembler, rmagic(tlb), blue_out, alpha_out );
-#else
-    "or rf7, 0x3f800000, 0x3f800000 ; nop",
-    "or rf8, 0x3f800000, 0x3f800000 ; nop",
-    "or rf9, 0x3f800000, 0x3f800000 ; nop",
-    "or rf10, 0x3f800000, 0x3f800000 ; nop",
-#endif
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-
-#else
-    // payload_w : rf0
-    // payload_w_centroid : rf1
-    // payload_z : rf2
-
-	// Load S ; write uniform texture p0
-    "nop                   ; nop                         ; ldvary.r0; wrtmuc", // (tex[0].p0 | 0x3)",
-	// S * W ; load T ; write uniform texture p1
-    "nop                   ; fmul r1, r0, rf0            ; ldvary.r3; wrtmuc",
-	// S + r5 (from varying?) ; T * W ; load R
-    "fadd r2, r1, r5       ; fmul r4, r3, rf0            ; ldvary.r1",
-	// T + r5 (from varying?) ; R * W ; load G
-    "fadd r0, r4, r5       ; fmul r3, r1, rf0            ; ldvary.r4",
-	// R + r5 (from varying?) ; G * W ; load B
-    "fadd rf3, r3, r5      ; fmul r1, r4, rf0            ; ldvary.r3",
-	// G + r5 (from varying?) ; B * W ; load A
-    "fadd rf4, r1, r5      ; fmul r4, r3, rf0            ; ldvary.r1",
-	// B + r5 (from varying?) ; set T
-    "fadd rf5, r4, r5      ; mov tmut, r0                ; thrsw",
-	// A * W
-    "nop                   ; fmul r3, r1, rf0            ; thrsw",
-	// A + r5 (from varying?) ; Set S
-    "fadd rf6, r3, r5      ; mov tmus, r2",
-	// Load RG
-    "nop                   ; nop                         ; ldtmu.r4",
-	// R * sample R ; Load BA
-    "nop                   ; fmul rf7, r4.l, rf3         ; ldtmu.r0",
-	// G * sample G
-	"nop                   ; fmul rf8, r4.h, rf4",
-	// B * sample B
-	"nop                   ; fmul rf9, r0.l, rf5",
-	// A * sample A
-	"nop                   ; fmul rf10, r0.h, rf6",
-	// RG
-    "vfpack tlb, rf7, rf8  ; nop                         ; thrsw",
-	// BA
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-#endif
-    // out[0] = vary[0] * payload_w + r5
-    // out[1] = vary[1] * payload_w + r5
-    // out[2] = vary[2] * payload_w + r5
-    // out[3] = vary[3] * payload_w + r5
-};
-
 /*
  * The RENDER-pass vertex shader must produce the FINAL, viewport-scaled
  * device-space Z itself: this shader's "z_sc" output (`fmul rf13, rf6,
@@ -1114,10 +938,8 @@ static const char* g_fragment_shader_untextured_fog_assembly[] = {
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -1132,16 +954,13 @@ static const char* g_fragment_shader_untextured_fog_assembly[] = {
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
     "fadd rf9, rf9, rf4 ; nop",
@@ -1483,77 +1302,6 @@ static const char* g_fragment_shader_untextured_alphatest_never_assembly[] = {
  * "alpha blend"/LERP formula. Each other factor combination needs its own
  * variant, which is what the shaders below it are.
  */
-static const char* g_fragment_shader_untextured_blend_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c, vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang... we make sure we always emit a thread switch
-     * before the first tlb color read." MESA's vir_emit_thrsw (same file)
-     * emits exactly ONE thrsw there, not the doubled pair this file uses to
-     * mark the program's LAST thread switch (two CONSECUTIVE thrsw, which
-     * is how v3d_assembler.h's own validator identifies it) -- a different
-     * convention for a different purpose.
-     *
-     * The gap matters too: MESA's scheduler (qpu_schedule.c,
-     * scoreboard_is_locked) counts the scoreboard as locked only once
-     * `tick - last_thrsw_tick >= 3`, i.e. at least 2 full instructions must
-     * separate the thrsw from the first TLB access. The ported validator
-     * (v3d_assembler.h, in_thrsw_delay_slots) checks only SFU/LDVARY-during-
-     * delay-slots, THRSW-too-close-to-THRSW and THREND RF-write timing --
-     * never TLB-read timing -- so it validating clean says nothing about
-     * this requirement. Hence the two filler instructions below. */
-    "nop ; nop ; thrsw", // single thread switch before the first tlb access
-    "nop ; nop",         // delay slot 1 of 2 (tick+1)
-    "nop ; nop",         // delay slot 2 of 2 (tick+2) -- ldtlb below lands at tick+3
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    /* Unpack dst r,g,b,a -- same sub/fadd F16-unpack trick as the
-     * multitexture fragment shader's own texel unpack. */
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fsub rf18, rf17, rf10 ; nop",           // rf18 = invAlpha = 1.0 - alpha
-
-    /* result = src*alpha + dst*invAlpha, per channel (alpha channel uses
-     * the same formula -- glBlendFunc, not glBlendFuncSeparate, applies
-     * identical factors to color and alpha). */
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf13, rf18",
-    "fadd rf7, rf19, rf20 ; nop", // result_r
-
-    "nop ; fmul rf19, rf8, rf10",
-    "nop ; fmul rf20, rf14, rf18",
-    "fadd rf8, rf19, rf20 ; nop", // result_g
-
-    "nop ; fmul rf19, rf9, rf10",
-    "nop ; fmul rf20, rf15, rf18",
-    "fadd rf9, rf19, rf20 ; nop", // result_b
-
-    "nop ; fmul rf19, rf10, rf10",
-    "nop ; fmul rf20, rf16, rf18",
-    "fadd rf10, rf19, rf20 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * Software-blend variant, additive (GL_ONE/GL_ONE), untextured.
  * g_fragment_shader_untextured_blend_assembly above implements the
@@ -1568,71 +1316,6 @@ static const char* g_fragment_shader_untextured_blend_assembly[] = {
  * straight to `vfpack` could exceed 1.0 and produce an out-of-range F16
  * value on write-back.
  */
-static const char* g_fragment_shader_untextured_blend_add_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-
-    /* ldtlb SPACING: MESA's vir_emit_tlb_color_read (nir_to_vir.c) never
-     * issues a second ldtlb immediately after the first for this packed-RG/
-     * packed-BA shape -- it always unpacks the first read's two components
-     * (2 FMOV instructions) BEFORE issuing the second ldtlb. This shader
-     * does the same: rf11's unpack (dst_r/dst_g) happens before ldtlb.rf12
-     * is issued, rather than both reads issuing first and all unpacking
-     * happening after. */
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-
-    "sub rf13, rf13, rf13 ; nop",
-    "sub rf14, rf14, rf14 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a) -- issued only after rf11's own unpack, matching MESA's spacing
-
-    "sub rf15, rf15, rf15 ; nop",
-    "sub rf16, rf16, rf16 ; nop",
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    /* result = src + dst, per channel, clamped to 1.0. */
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * SMOOTH-capable additive (GL_ONE/GL_ONE) software-blend shader. The plain
  * additive variant above reads a single FLAT color from a uniform; this
@@ -1644,226 +1327,6 @@ static const char* g_fragment_shader_untextured_blend_add_assembly[] = {
  * VERTEX_SMOOTH vertex shader and varying layout as the smooth-untextured
  * fragment shader -- only the FRAGMENT shader differs.
  */
-static const char* g_fragment_shader_untextured_smooth_blend_add_assembly[] = {
-    /* Per-vertex color, perspective-correct interpolation -- byte-for-byte
-     * the same pattern as g_fragment_shader_untextured_smooth_assembly
-     * above, just landing in rf7-rf10 (matching this shader's own
-     * src-color register convention) instead of that shader's. */
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    /* result = src + dst, per channel, clamped to 1.0. */
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * GL_SRC_ALPHA/GL_ONE (alpha-weighted additive) software blend,
- * untextured, flat -- every other SRCALPHA-source variant in this family
- * pairs with INVSRCALPHA, so this combination needs its own shader. Same
- * splice technique as the rest of the family: the LERP shader's src*alpha
- * multiply, combined with the additive shader's dst-add-and-clamp tail
- * (the dst factor is ONE, not 1-alpha, so no invAlpha term is needed).
- * All 4 src*alpha products are computed into their OWN fresh registers
- * (rf19-rf22) before any of them is consumed -- mirroring the LERP
- * shader's two-fmul-before-fadd shape (rf19/rf20 computed, then both
- * consumed several instructions later) rather than an fmul-then-fadd on
- * the very next instruction, which no shader in this file does.
- */
-static const char* g_fragment_shader_untextured_blend_srcalpha_one_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    /* src*alpha, all 4 channels, into fresh registers before any is
-     * consumed. */
-    "nop ; fmul rf19, rf7, rf10",  // rf19 = src_r * alpha
-    "nop ; fmul rf20, rf8, rf10",  // rf20 = src_g * alpha
-    "nop ; fmul rf21, rf9, rf10",  // rf21 = src_b * alpha
-    "nop ; fmul rf22, rf10, rf10", // rf22 = alpha * alpha (before rf10 is overwritten)
-
-    /* result = src*alpha + dst, per channel, clamped to 1.0
-     * (SRC_ALPHA/ONE). */
-    "fadd rf7, rf19, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-
-    "fadd rf8, rf20, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-
-    "fadd rf9, rf21, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-
-    "fadd rf10, rf22, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Smooth-capable sibling of the GL_SRC_ALPHA/GL_ONE flat variant above --
- * same relationship as the additive family's own flat/smooth pair. The
- * per-vertex color read is byte-for-byte the same pattern as
- * g_fragment_shader_untextured_smooth_blend_add_assembly; only the combine
- * tail differs (src*alpha + dst instead of src + dst).
- */
-static const char* g_fragment_shader_untextured_smooth_blend_srcalpha_one_assembly[] = {
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf8, rf10",
-    "nop ; fmul rf21, rf9, rf10",
-    "nop ; fmul rf22, rf10, rf10",
-
-    "fadd rf7, rf19, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-
-    "fadd rf8, rf20, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-
-    "fadd rf9, rf21, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-
-    "fadd rf10, rf22, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * SMOOTH-capable LERP (SRC_ALPHA/ONE_MINUS_SRC_ALPHA) software-blend
  * shader: the flat/uniform-color LERP variant above cannot express a
@@ -1871,182 +1334,6 @@ static const char* g_fragment_shader_untextured_smooth_blend_srcalpha_one_assemb
  * per-vertex color read (ldvary + perspective-correct fmul/fadd) with the
  * flat LERP variant's combine math, unchanged. Takes VERTEX_SMOOTH.
  */
-static const char* g_fragment_shader_untextured_smooth_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fsub rf18, rf17, rf10 ; nop",           // rf18 = invAlpha = 1.0 - alpha
-
-    /* result = src*alpha + dst*invAlpha, per channel -- identical
-     * formula to the flat LERP variant above, just fed real per-vertex
-     * src color instead of a uniform. */
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf13, rf18",
-    "fadd rf7, rf19, rf20 ; nop", // result_r
-
-    "nop ; fmul rf19, rf8, rf10",
-    "nop ; fmul rf20, rf14, rf18",
-    "fadd rf8, rf19, rf20 ; nop", // result_g
-
-    "nop ; fmul rf19, rf9, rf10",
-    "nop ; fmul rf20, rf15, rf18",
-    "fadd rf9, rf19, rf20 ; nop", // result_b
-
-    "nop ; fmul rf19, rf10, rf10",
-    "nop ; fmul rf20, rf16, rf18",
-    "fadd rf10, rf19, rf20 ; nop", // result_a
-
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * TEXTURED software blend: the software-blend shaders above all emit a
- * flat/uniform or per-vertex-varying color with no texture sampling at
- * all, so a textured draw needs its own variant.
- *
- * Combines g_fragment_shader_assembly's texture-sample sequence (ldvary +
- * w-divide s/t computation, TMU write/trigger, ldtmu read, F16 unpack --
- * the texture-read channel convention is blue,green,red,alpha in
- * rf7/rf8/rf9/rf10, NOT straight r,g,b,a, matching that shader's own
- * "colors are different when shown as a texture" comment) with the
- * SRC_ALPHA/ONE_MINUS_SRC_ALPHA LERP-against-tile-buffer math from
- * g_fragment_shader_untextured_blend_assembly above, and the
- * texture+ldtlb-in-one-shader structure/thrsw layout from
- * g_fragment_shader_multitexture_modulate_blend_assembly (single thrsw
- * pair for the one TMU trigger, single final thrsw at the last vfpack --
- * NOT the doubled-thrsw-pair ending the flat/smooth software-blend
- * variants use).
- *
- * GL_MODULATE means the final alpha is tex_alpha * color_alpha, not
- * tex_alpha alone -- a uniform carries that color-alpha multiplier in,
- * since it is not part of the texture sample itself.
- */
-static const char* g_fragment_shader_textured_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // tex_blue
-    "fadd rf8, rf8, rf4.h ; nop",  // tex_green
-    "fadd rf9, rf9, rf3.l ; nop",  // tex_red
-    "fadd rf10, rf10, rf3.h ; nop", // tex_alpha
-
-    /* RGB modulation by glColor, one channel at a time: a texture that
-     * carries no colour of its own (flat white with only its ALPHA shaped)
-     * takes its colour entirely from glColor's RGB, so the RGB channels
-     * must be modulated as well as the alpha. rf5 is dead after the
-     * tmu-request thrsw section above, so no new register is needed and
-     * all three channels need not be held at once. */
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color blue multiplier (uniform 0)
-    "nop ; fmul rf7, rf7, rf5", // rf7 = tex_blue * color_blue
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color green multiplier (uniform 1)
-    "nop ; fmul rf8, rf8, rf5", // rf8 = tex_green * color_green
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color red multiplier (uniform 2)
-    "nop ; fmul rf9, rf9, rf5", // rf9 = tex_red * color_red
-
-    "nop ; nop ; ldunifrf.rf24", // rf24 = glColor alpha multiplier (uniform 3)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = final alpha = tex_alpha * color_alpha
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // reuse rf24 (color-alpha no longer needed) for 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-
-    /* The destination term is paired by REGISTER INDEX: rf7 (vfpack's RED
-     * slot) takes dst_red (rf27) and rf9 (the BLUE slot) takes dst_blue
-     * (rf29). rf7/rf9 already hold the cross-labelled texel data (this
-     * shader family's established convention), so pairing by the colour
-     * NAME in the labels instead would cross the background term and tint
-     * it at low alpha. Same pairing as
-     * g_fragment_shader_textured_smooth_blend_assembly. */
-    "nop ; fmul r0, rf7, rf10",   // tex_blue * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-
-    "nop ; fmul r0, rf9, rf10",   // tex_red * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * Textured + flat-shaded, modulated by glColor. g_fragment_shader_assembly
  * samples the texture and packs it straight to the tile buffer with no
@@ -2081,28 +1368,105 @@ static const char* g_fragment_shader_textured_colormod_assembly[] = {
     "nop ; nop ; ldtmu.rf4",
     "nop ; nop ; ldtmu.rf3",
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // tex_blue
-    "fadd rf8, rf8, rf4.h ; nop",  // tex_green
-    "fadd rf9, rf9, rf3.l ; nop",  // tex_red
-    "fadd rf10, rf10, rf3.h ; nop", // tex_alpha
 
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color blue multiplier (uniform 0)
-    "nop ; fmul rf7, rf7, rf5", // rf7 = tex_blue * color_blue
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color green multiplier (uniform 1)
-    "nop ; fmul rf8, rf8, rf5", // rf8 = tex_green * color_green
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color red multiplier (uniform 2)
-    "nop ; fmul rf9, rf9, rf5", // rf9 = tex_red * color_red
-    "nop ; nop ; ldunifrf.rf24", // rf24 = color alpha multiplier (uniform 3)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = tex_alpha * color_alpha
+    "nop ; nop ; ldunifrf.rf5", // rf5 = colour RED multiplier (uniform 0)
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5", // rf7 = texel.r * colour.r
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5", // rf8 = texel.g * colour.g
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf24", // rf9 = texel.b * colour.b
+    "nop ; fmul rf10, rf3.h, rf24", // rf10 = tex_alpha * color_alpha
 
     "vfpack tlb, rf7, rf8  ; nop ; thrsw",
     "vfpack tlb, rf9, rf10 ; nop",
     "nop                   ; nop",
 };
+
+/*
+ * TEXTURED, FLAT, GL_BLEND. Derived from textured_colormod.
+ * rf7/rf8/rf9/rf10 are red/green/blue/alpha: uniform 0 is fixed_color's byte 0,
+ * which is red, and it multiplies rf7.
+ */
+static const char* g_fragment_shader_textured_colormod_envblend_assembly[] = {
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf5, r1, r5 ; nop",
+    "nop ; nop",
+    "or tmut, rf5, rf5 ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "or tmus, rf6, rf6 ; nop",
+
+    "nop ; nop ; ldtmu.rf4",
+    "nop ; nop ; ldtmu.rf3",
+
+
+    /* GL_BLEND: Cv = Cp + Cs*(Cc - Cp), a lerp between the primary colour and
+     * the environment colour, so the result is in [0,1] with no clamp. All
+     * four Cp words are read before the three Cc words, because that is the
+     * order draw.c writes them and the stream is positional. */
+    "nop ; nop ; ldunifrf.rf5",
+    "nop ; nop ; ldunifrf.rf6",
+    "nop ; nop ; ldunifrf.rf11",
+    "nop ; nop ; ldunifrf.rf12",
+    "nop ; nop ; ldunifrf.rf13",
+    "nop ; nop ; ldunifrf.rf14",
+    "nop ; nop ; ldunifrf.rf15",
+    "fsub rf13, rf13, rf5 ; nop",
+    "fsub rf14, rf14, rf6 ; nop",
+    "fsub rf15, rf15, rf11 ; nop",
+    "nop ; fmul r0, rf4.l, rf13",
+    "nop ; fmul r1, rf4.h, rf14",
+    "nop ; fmul r2, rf3.l, rf15",
+    "fadd rf7, rf5, r0 ; nop",
+    "fadd rf8, rf6, r1 ; nop",
+    "fadd rf9, rf11, r2 ; nop",
+    "nop ; fmul rf10, rf3.h, rf12",
+
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+
+/*
+ * TEXTURED, FLAT, GL_ADD. Derived from textured_colormod.
+ * rf7/rf8/rf9/rf10 are red/green/blue/alpha: uniform 0 is fixed_color's byte 0,
+ * which is red, and it multiplies rf7.
+ */
+static const char* g_fragment_shader_textured_colormod_envadd_assembly[] = {
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf5, r1, r5 ; nop",
+    "nop ; nop",
+    "or tmut, rf5, rf5 ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "or tmus, rf6, rf6 ; nop",
+
+    "nop ; nop ; ldtmu.rf4",
+    "nop ; nop ; ldtmu.rf3",
+
+
+    /* GL_ADD: Cv = Cp + Cs, Av = Ap * As. 1.0 is materialised FIRST so each
+     * fmin sits four instructions after the fadd that fills its register. */
+    "or rf11, 0x3f800000, 0x3f800000 ; nop",
+    "nop ; nop ; ldunifrf.rf5",
+    "fadd rf7, rf5, rf4.l ; nop ; ldunifrf.rf5",
+    "fadd rf8, rf5, rf4.h ; nop ; ldunifrf.rf5",
+    "fadd rf9, rf5, rf3.l ; nop ; ldunifrf.rf24",
+    "nop ; fmul rf10, rf3.h, rf24",
+    /* GL clamps the result, and ADD is the one mode that can exceed 1. The
+     * alpha is a product of two [0,1] values and needs none. */
+    "fmin rf7, rf7, rf11 ; nop",
+    "fmin rf8, rf8, rf11 ; nop",
+    "fmin rf9, rf9, rf11 ; nop",
+
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
 
 /*
  * Textured + SMOOTH + blend, software (ldtlb) path -- the three-way
@@ -2119,547 +1483,6 @@ static const char* g_fragment_shader_textured_colormod_assembly[] = {
  *      point where IT has rf7-rf10 = modulated color (its own
  *      texel*glColor-alpha step) -- step 1 above lands in the exact same
  *      rf7-rf10 shape, so step 2 splices on unchanged. */
-static const char* g_fragment_shader_textured_smooth_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    /* From here down: verbatim from g_fragment_shader_textured_blend_
-     * assembly's own ldtlb-LERP section, unmodified -- rf7-rf10 already
-     * hold modulated color, matching what THAT shader has at this same
-     * point in its own sequence. */
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-
-    /* The destination term is paired by REGISTER INDEX: rf7 (which ends up
-     * in vfpack's RED slot) takes dst_red (rf27), rf9 (the BLUE slot)
-     * takes dst_blue (rf29). rf7/rf9 already hold the correct red/blue by
-     * this point -- the vertex-color double-crossing upstream (draw.c's
-     * CPU-side swap feeding this shader's rf20/rf22 crossing above)
-     * cancels out -- so pairing the background term by the colour NAME in
-     * the labels instead would cross it independently. That is invisible
-     * at high alpha, where the source colour dominates, and tints the
-     * background at low alpha. */
-    "nop ; fmul r0, rf7, rf10",   // true red * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-
-    "nop ; fmul r0, rf9, rf10",   // true blue * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Four textured+smooth+!multitextured software-blend variants, one per dst
- * factor with src=GL_DST_COLOR: SRCCOLOR, INVDSTALPHA, ZERO and ONE.
- *
- * All 4 are the exact same splice technique as
- * g_fragment_shader_textured_smooth_blend_assembly directly above:
- *   1. Front section (TMU fetch + per-vertex-color modulation), copied
- *      verbatim -- produces rf7/rf8/rf9/rf10 = modulated (blue,green,red,
- *      alpha), same as every other textured+smooth variant in this file.
- *   2. ldtlb dest-read + unpack, also copied verbatim -- produces
- *      rf27/rf28/rf29/rf30 = dst (red,green,blue,alpha), matching that
- *      shader's own comment on the convention.
- *   3. NEW tail: real blend math for src=DST_COLOR (i.e. Sf=Cd, using the
- *      just-read destination color as the source factor) against each
- *      shader's own fixed dst factor Df, per the standard blend equation
- *      result = Cs*Sf + Cd*Df = Cs*Cd + Cd*Df:
- *        - ZERO (Df=0):      result = Cs*Cd            (pure multiply)
- *        - ONE (Df=1):       result = Cs*Cd + Cd
- *        - SRCCOLOR (Df=Cs): result = Cs*Cd + Cd*Cs = 2*Cs*Cd
- *        - INVDSTALPHA (Df=1-Cd.a): result = Cs*Cd + Cd*(1-Cd.a)
- *      Every instruction is single-op-per-slot (nop in the unused slot),
- *      matching this file's own established convention throughout rather
- *      than attempting dual-issue -- no new QPU idiom introduced, same
- *      register file (r0/r1 scratch, rf24 as the reusable 1.0 constant,
- *      same as the LERP tail above), same thrsw/vfpack ending shape.
- */
-static const char* g_fragment_shader_textured_smooth_dstcolor_zero_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs*Cd (Df=ZERO, no dst term). Paired by REGISTER INDEX
-     * (rf7<->rf27, rf8<->rf28, rf9<->rf29, rf10<->rf30), matching the LERP
-     * tail above -- NOT by the front section's own "blue/green/red/alpha"
-     * slot labels, which disagree with the downstream "true red/true blue"
-     * labels that same tail uses at this exact point (a red/blue crossing
-     * baked into this whole shader family and compensated for on the C
-     * side). Pairing by colour NAME instead of by index produces a visible
-     * red/blue swap. */
-    "nop ; fmul rf7, rf7, rf27",   // true_red = red * dst_red
-    "nop ; fmul rf8, rf8, rf28",   // green = green * dst_green
-    "nop ; fmul rf9, rf9, rf29",   // true_blue = blue * dst_blue
-    "nop ; fmul rf10, rf10, rf30", // alpha = alpha * dst_alpha
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_textured_smooth_dstcolor_one_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs*Cd + Cd (Df=ONE). Paired by REGISTER INDEX -- see the
-     * ZERO variant's own comment above for why (rf7<->rf27, rf9<->rf29,
-     * not by color name). */
-    "nop ; fmul r0, rf7, rf27",  // r0 = true_red * dst_red
-    "fadd rf7, r0, rf27 ; nop",  // true_red result
-
-    "nop ; fmul r0, rf8, rf28",  // green
-    "fadd rf8, r0, rf28 ; nop",
-
-    "nop ; fmul r0, rf9, rf29",  // true_blue
-    "fadd rf9, r0, rf29 ; nop",
-
-    "nop ; fmul r0, rf10, rf30", // alpha
-    "fadd rf10, r0, rf30 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_textured_smooth_dstcolor_srccolor_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs*Cd + Cd*Cs = 2*Cs*Cd (Df=SRCCOLOR=Cs, same term twice).
-     * Paired by REGISTER INDEX -- see the ZERO variant's own comment
-     * above for why (rf7<->rf27, rf9<->rf29, not by color name). */
-    "nop ; fmul r0, rf7, rf27",  // r0 = true_red * dst_red
-    "fadd rf7, r0, r0 ; nop",    // true_red result = 2*r0
-
-    "nop ; fmul r0, rf8, rf28",
-    "fadd rf8, r0, r0 ; nop",
-
-    "nop ; fmul r0, rf9, rf29",
-    "fadd rf9, r0, r0 ; nop",
-
-    "nop ; fmul r0, rf10, rf30",
-    "fadd rf10, r0, r0 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_textured_smooth_dstcolor_invdstalpha_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs*Cd + Cd*(1-Cd.a) (Df=INVDSTALPHA). Paired by REGISTER
-     * INDEX -- see the ZERO variant's own comment above for why
-     * (rf7<->rf27, rf9<->rf29, not by color name). */
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf30 ; nop", // rf24 = invDstAlpha = 1.0 - dst_alpha
-
-    "nop ; fmul r0, rf7, rf27",   // r0 = true_red * dst_red
-    "nop ; fmul r1, rf27, rf24",  // r1 = dst_red * invDstAlpha
-    "fadd rf7, r0, r1 ; nop",     // true_red result
-
-    "nop ; fmul r0, rf8, rf28",
-    "nop ; fmul r1, rf28, rf24",
-    "fadd rf8, r0, r1 ; nop",
-
-    "nop ; fmul r0, rf9, rf29",
-    "nop ; fmul r1, rf29, rf24",
-    "fadd rf9, r0, r1 ; nop",
-
-    "nop ; fmul r0, rf10, rf30",
-    "nop ; fmul r1, rf30, rf24",
-    "fadd rf10, r0, r1 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Textured+smooth+!multitextured software blend, src=ZERO,
- * dst=INVSRCCOLOR. Same splice technique as the 4 DSTCOLOR variants
- * directly above -- identical front section + ldtlb dest-read, only the
- * tail math differs:
- *   result = Cs*Sf + Cd*Df = Cs*0 + Cd*(1-Cs) = Cd*(1-Cs)
- * Paired by REGISTER INDEX throughout (rf7<->rf27, rf8<->rf28,
- * rf9<->rf29, rf10<->rf30), the same convention as the DSTCOLOR family.
- */
-static const char* g_fragment_shader_textured_smooth_zero_invsrccolor_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cd*(1-Cs) (Sf=ZERO drops the Cs*Sf term entirely, Df=
-     * INVSRCCOLOR=1-Cs). Paired by REGISTER INDEX -- see the DSTCOLOR
-     * family's own comment for why (rf7<->rf27, rf9<->rf29, not by
-     * color name). */
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-
-    "fsub r0, rf24, rf7 ; nop",   // r0 = 1 - true_red (src)
-    "nop ; fmul rf7, rf27, r0",   // true_red result = dst_red * (1-src)
-
-    "fsub r0, rf24, rf8 ; nop",   // r0 = 1 - green
-    "nop ; fmul rf8, rf28, r0",   // green result = dst_green * (1-src)
-
-    "fsub r0, rf24, rf9 ; nop",   // r0 = 1 - true_blue
-    "nop ; fmul rf9, rf29, r0",   // true_blue result
-
-    "fsub r0, rf24, rf10 ; nop",  // r0 = 1 - alpha
-    "nop ; fmul rf10, rf30, r0",  // alpha result
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Back in the DSTCOLOR family, with a dst factor (SRCALPHA) the original
- * four do not cover. Same splice technique, same front section + ldtlb
- * dest-read as every other variant in this family. Tail math:
- *   result = Cs*Sf + Cd*Df = Cs*Cd + Cd*Cs.a = Cd*(Cs+Cs.a)
- * SRCALPHA (Cs.a, rf10) is a single SCALAR applied uniformly to every
- * channel's dst term -- the same role rf10 plays in the LERP shader's own
- * tail (g_fragment_shader_textured_smooth_blend_assembly above). Paired by
- * REGISTER INDEX throughout (rf7<->rf27, rf8<->rf28, rf9<->rf29,
- * rf10<->rf30), the same convention as the rest of the DSTCOLOR family.
- */
-static const char* g_fragment_shader_textured_smooth_dstcolor_srcalpha_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cd*(Cs+Cs.a) (Sf=DSTCOLOR=Cd, Df=SRCALPHA=Cs.a applied
-     * uniformly to every channel). Paired by REGISTER INDEX -- see the
-     * DSTCOLOR family's own comment for why (rf7<->rf27, rf9<->rf29,
-     * not by color name). */
-    "fadd r0, rf7, rf10 ; nop",   // r0 = true_red + alpha
-    "nop ; fmul rf7, rf27, r0",   // true_red result = dst_red * (red+alpha)
-
-    "fadd r0, rf8, rf10 ; nop",   // r0 = green + alpha
-    "nop ; fmul rf8, rf28, r0",   // green result
-
-    "fadd r0, rf9, rf10 ; nop",   // r0 = true_blue + alpha
-    "nop ; fmul rf9, rf29, r0",   // true_blue result
-
-    "fadd r0, rf10, rf10 ; nop",  // r0 = alpha + alpha
-    "nop ; fmul rf10, rf30, r0",  // alpha result
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * Two more src factors for this family: ONE and INVSRCALPHA. Same splice
  * technique as the rest of it -- identical front section + ldtlb
@@ -2668,389 +1491,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_srcalpha_assembly[
  * convention as the rest of the family (see v3d_shader_assembler.h's own
  * comment on these 2 enum entries for the exact formulas).
  */
-static const char* g_fragment_shader_textured_smooth_one_invsrcalpha_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs + Cd*(1-Cs.a) (Sf=ONE, Df=INVSRCALPHA=1-Cs.a applied
-     * uniformly to every channel). rf24=invAlpha snapshotted from the
-     * ORIGINAL rf10 (alpha) BEFORE rf10 itself is overwritten last --
-     * every other channel's own read of rf24 (not rf10 directly) stays
-     * correct regardless of ordering. */
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1 - alpha
-
-    "nop ; fmul r0, rf27, rf24",   // r0 = dst_red * invAlpha
-    "fadd rf7, rf7, r0 ; nop",     // true_red result = red + r0
-
-    "nop ; fmul r0, rf28, rf24",
-    "fadd rf8, rf8, r0 ; nop",
-
-    "nop ; fmul r0, rf29, rf24",
-    "fadd rf9, rf9, r0 ; nop",
-
-    "nop ; fmul r0, rf30, rf24",
-    "fadd rf10, rf10, r0 ; nop",   // last write to rf10 -- safe, rf24 already snapshotted it
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result = Cs*(1-Cs.a) + Cd*Cs.a (Sf=INVSRCALPHA, Df=SRCALPHA). Every
-     * channel's r0/r1 pair reads rf10 (alpha) directly BEFORE rf10 itself
-     * is overwritten last, so the ordering here is safe the same way as
-     * the ONE_INVSRCALPHA variant above. */
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1 - alpha
-
-    "nop ; fmul r0, rf7, rf24",    // r0 = true_red * invAlpha
-    "nop ; fmul r1, rf27, rf10",   // r1 = dst_red * alpha
-    "fadd rf7, r0, r1 ; nop",      // true_red result
-
-    "nop ; fmul r0, rf8, rf24",
-    "nop ; fmul r1, rf28, rf10",
-    "fadd rf8, r0, r1 ; nop",
-
-    "nop ; fmul r0, rf9, rf24",
-    "nop ; fmul r1, rf29, rf10",
-    "fadd rf9, r0, r1 ; nop",
-
-    "nop ; fmul r0, rf10, rf24",   // reads rf10 (still original alpha)
-    "nop ; fmul r1, rf30, rf10",   // reads rf10 (still original alpha)
-    "fadd rf10, r0, r1 ; nop",     // last write to rf10
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Textured + smooth + ONE/ONE additive software blend. The two untextured
- * additive variants (g_fragment_shader_untextured_blend_add_assembly and
- * its smooth sibling) structurally require `!textured`; the two textured
- * variants above cover only the SRC_ALPHA/INV_SRC_ALPHA LERP pair.
- *
- * A splice of two existing pieces, the same technique as
- * g_fragment_shader_textured_smooth_blend_assembly (see that shader's
- * comment above):
- *   1. that shader's TMU fetch + per-vertex-color modulate front section,
- *      verbatim, up to where it has rf7-rf10 = modulated
- *      (blue,green,red,alpha) in its own vfpack-slot convention.
- *   2. g_fragment_shader_untextured_smooth_blend_add_assembly's ldtlb
- *      dest-read + additive-clamp combine tail, verbatim from its ldtlb
- *      reads onward -- its own "2 consecutive thrsw" pair near the end is
- *      dropped, because piece 1's TMU-fetch thrsw pair already satisfies
- *      the "2 consecutive" half of the thrsw protocol and only the one
- *      embedded in the final vfpack is still needed, leaving the same
- *      3-line ending g_fragment_shader_textured_smooth_blend_assembly has.
- *
- * The dst term is paired with piece 1's rf7/rf8/rf9/rf10 BY POSITION
- * (1st-ldtlb-read-low, 1st-read-high, 2nd-read-low, 2nd-read-high), not by
- * channel name -- the R/B crossing baked into this family means the
- * "red"/"blue" labels do not track physical channel identity past the
- * modulate step.
- */
-static const char* g_fragment_shader_textured_smooth_blend_add_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst (1st read, low)
-    "fadd rf14, rf14, rf11.h ; nop", // dst (1st read, high)
-    "fadd rf15, rf15, rf12.l ; nop", // dst (2nd read, low)
-    "fadd rf16, rf16, rf12.h ; nop", // dst (2nd read, high)
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    /* result = src + dst, per channel, clamped to 1.0. */
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop",
-
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop",
-
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop",
-
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * Textured+smooth sibling of the two untextured SRC_ALPHA/ONE variants
- * above, the same relationship as this shader's additive sibling just
- * above it. The front section (texture fetch + per-vertex modulate + dst
- * read/unpack) is byte-for-byte identical to
- * g_fragment_shader_textured_smooth_blend_add_assembly -- only the combine
- * tail differs. rf7-10 hold texel*vertex-color per channel (in whatever
- * channel order this shader's own vfpack established, not necessarily
- * r,g,b,a -- paired by INDEX with rf13-16 exactly as that shader does, not
- * by colour name, per this family's register-pairing rule). src*alpha
- * products go into fresh rf24-rf27 (not rf19-22, already spent on the
- * vertex-color computation earlier in this shader) before any is consumed,
- * the same latency-safe shape as the untextured variants.
- */
-static const char* g_fragment_shader_textured_smooth_blend_srcalpha_one_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf20, r1, r5 ; nop",
-
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf21, r1, r5 ; nop",
-
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf22, r1, r5 ; nop",
-
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf23, r1, r5 ; nop",
-
-    "nop ; fmul rf7, rf4.l, rf20",
-    "nop ; fmul rf8, rf4.h, rf21",
-    "nop ; fmul rf9, rf3.l, rf22",
-    "nop ; fmul rf10, rf3.h, rf23",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop",
-    "fadd rf14, rf14, rf11.h ; nop",
-    "fadd rf15, rf15, rf12.l ; nop",
-    "fadd rf16, rf16, rf12.h ; nop",
-
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-
-    /* src*alpha, all 4 channels, into fresh registers (rf24-27, not
-     * rf19-22 -- already spent on vertex-color computation above) before
-     * any is consumed. */
-    "nop ; fmul rf24, rf7, rf10",
-    "nop ; fmul rf25, rf8, rf10",
-    "nop ; fmul rf26, rf9, rf10",
-    "nop ; fmul rf27, rf10, rf10",
-
-    "fadd rf7, rf24, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop",
-
-    "fadd rf8, rf25, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop",
-
-    "fadd rf9, rf26, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop",
-
-    "fadd rf10, rf27, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
- * DIAGNOSTIC variant, no draw shape selects it: it is assembled and
- * uploaded like the rest, but draw.c's fragment dispatch never reaches it.
- * Identical to g_fragment_shader_assembly except for 8 extra harmless
- * "nop ; nop" instructions inserted at the same relative position
- * g_fragment_shader_textured_smooth_blend_assembly's 4 extra varying-read
- * triplets sit (right after the TMU-fetch thrsw pair, before the
- * unpack/modulate step) -- so total instruction count (30) and thrsw
- * timing match the smooth shader exactly, with zero varying reads. It
- * separates "instruction count and thrsw timing" from "the varying reads
- * themselves" when a smooth-shaded draw is made to run flat shader code.
- */
-static const char* g_fragment_shader_padded_flat_test_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    /* 8 harmless filler instructions -- same COUNT and POSITION as the
-     * smooth+blend shader's 4 extra ldvary/fmul/fadd triplets (which
-     * are 12 instructions, not 8 -- but the smooth+TEXTURED shader
-     * without blend, g_fragment_shader_textured_smooth_assembly, saves
-     * 4 elsewhere via its fmul-modulate replacing the flat shader's
-     * separate sub+fadd unpack, netting +8 overall against this shader's
-     * 22). Plain ALU no-ops, no signals, no register writes -- pure
-     * timing filler. */
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "nop ; nop",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-
-
-
-
-
-
 /*
  * Smooth (GL_SMOOTH, per-vertex color), untextured only. A modified copy
  * of g_vertex_shader_assembly above, not an in-place edit of it, so that
@@ -3098,7 +1538,7 @@ static const char* g_vertex_shader_smooth_assembly[] =
     "ldvpmv_in rf2,  2 ; nop", // z_m
 
     /* Color (r,g,b,a), held across the matrix-multiply section exactly
-     * like s/t were -- these 4 registers are never touched below. */
+     * like s/t -- these 4 registers are never touched below. */
     "ldvpmv_in rf11,  3 ; nop", // color r
     "ldvpmv_in rf12,  4 ; nop", // color g
     "ldvpmv_in rf14,  5 ; nop", // color b
@@ -3378,12 +1818,12 @@ static const char* g_vertex_shader_smooth_textured_clipspace_assembly[] =
     "ldvpmv_in rf1,  1 ; nop", // y_m
     "ldvpmv_in rf2,  2 ; nop", // z_m
 
-    "ldvpmv_in rf11,  4 ; nop", // s (shifted: was offset 3)
-    "ldvpmv_in rf12,  5 ; nop", // t (shifted: was offset 4)
-    "ldvpmv_in rf14,  6 ; nop", // color r (shifted: was offset 5)
-    "ldvpmv_in rf15,  7 ; nop", // color g (shifted: was offset 6)
-    "ldvpmv_in rf16,  8 ; nop", // color b (shifted: was offset 7)
-    "ldvpmv_in rf17,  9 ; nop", // color a (shifted: was offset 8)
+    "ldvpmv_in rf11,  4 ; nop", // s (shifted: offset 3 in the original)
+    "ldvpmv_in rf12,  5 ; nop", // t (shifted: offset 4 in the original)
+    "ldvpmv_in rf14,  6 ; nop", // color r (shifted: offset 5 in the original)
+    "ldvpmv_in rf15,  7 ; nop", // color g (shifted: offset 6 in the original)
+    "ldvpmv_in rf16,  8 ; nop", // color b (shifted: offset 7 in the original)
+    "ldvpmv_in rf17,  9 ; nop", // color a (shifted: offset 8 in the original)
 
     /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_smooth_textured_assembly. */
     "nop ; nop ; ldunif",
@@ -3593,10 +2033,10 @@ static const char* g_vertex_shader_multitexture_clipspace_assembly[] =
     "ldvpmv_in rf1,  1 ; nop", // y_m
     "ldvpmv_in rf2,  2 ; nop", // z_m
 
-    "ldvpmv_in rf11,  4 ; nop", // s0 (shifted: was offset 3)
-    "ldvpmv_in rf12,  5 ; nop", // t0 (shifted: was offset 4)
-    "ldvpmv_in rf14,  6 ; nop", // s1 (shifted: was offset 5)
-    "ldvpmv_in rf15,  7 ; nop", // t1 (shifted: was offset 6)
+    "ldvpmv_in rf11,  4 ; nop", // s0 (shifted: offset 3 in the original)
+    "ldvpmv_in rf12,  5 ; nop", // t0 (shifted: offset 4 in the original)
+    "ldvpmv_in rf14,  6 ; nop", // s1 (shifted: offset 5 in the original)
+    "ldvpmv_in rf15,  7 ; nop", // t1 (shifted: offset 6 in the original)
 
     /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_multitexture_assembly. */
     "nop ; nop ; ldunif",
@@ -3740,14 +2180,6 @@ static const char* g_fragment_shader_multitexture_assembly[] = {
     "nop ; nop ; ldtmu.rf18", // unit1 red_alpha
 
     /* Unpack unit 0's texel (the sub/fadd trick). */
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",   // unit0 blue
-    "fadd rf8, rf8, rf4.h ; nop",   // unit0 green
-    "fadd rf9, rf9, rf3.l ; nop",   // unit0 red
-    "fadd rf10, rf10, rf3.h ; nop", // unit0 alpha
 
     /* Unpack unit 1's texel. */
     "sub rf20, rf20, rf20 ; nop",
@@ -3760,15 +2192,103 @@ static const char* g_fragment_shader_multitexture_assembly[] = {
     "fadd rf23, rf23, rf18.h ; nop", // unit1 alpha
 
     /* Combine: multiply all 4 channels (GL_MODULATE). */
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
+    "nop ; fmul rf7, rf4.l, rf20",
+    "nop ; fmul rf8, rf4.h, rf21",
+    "nop ; fmul rf9, rf3.l, rf22",
+    "nop ; fmul rf10, rf3.h, rf23",
 
     "vfpack tlb, rf7, rf8  ; nop ; thrsw", // final thread-end thrsw
     "vfpack tlb, rf9, rf10 ; nop",
     "nop                   ; nop",
 };
+
+/*
+ * LIT, MULTITEXTURED, GL_MODULATE on unit 1. The unlit variant computes
+ * texel0 x texel1 and reads no colour at all; this one reads the lit colour as
+ * four varyings and multiplies it in, which is GL's rule -- unit 0 modulates
+ * its texel with the PRIMARY colour, and under lighting that colour is the lit
+ * one.
+ *
+ * GL_REPLACE needs no lit variant: texel1 replaces everything, so the primary
+ * colour is correctly dropped, and that shader reads only the four texcoord
+ * varyings with the colour sitting after them unread -- so it pairs with the
+ * lit vertex shader as it is.
+ */
+static const char* g_fragment_shader_lit_multitexture_assembly[] = {
+    /* Unit 0: s0/t0 reconstruction + TMU config, byte-for-byte the same
+     * sequence -- issues the fetch but does NOT wait yet. */
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf5, r1, r5 ; nop",
+    "nop ; nop",
+    "or tmut, rf5, rf5 ; nop",
+    "or tmus, rf6, rf6 ; nop", /* triggers unit 0's fetch, queued */
+
+    /* Unit 1: s1/t1 reconstruction + TMU config -- same sequence again,
+     * fresh registers. The doubled thrsw pair goes on THIS fetch's
+     * trigger since it's the shader's last TMU-wait point. */
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf16, r1, r5 ; nop",
+    /* THE LIT COLOUR, four varyings. ldvary is sequential and the
+     * vertex shader emits the colour after both texcoord pairs, so
+     * these follow on. Read here, with the other varying reads and
+     * before the last-thrsw pair. */
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf24, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf25, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf26, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf27, r1, r5 ; nop",
+    "nop ; nop",
+    "or tmut, rf16, rf16 ; nop ; thrsw", /* last-thrsw signal, part 1 of 2 */
+    "nop ; nop ; thrsw",                  /* last-thrsw signal, part 2 of 2 */
+    "or tmus, rf17, rf17 ; nop",          /* triggers unit 1's fetch, queued */
+
+    /* Read both fetches' results, FIFO issue order: unit 0 first, then
+     * unit 1. */
+    "nop ; nop ; ldtmu.rf4",  // unit0 blue_green
+    "nop ; nop ; ldtmu.rf3",  // unit0 red_alpha
+    "nop ; nop ; ldtmu.rf19", // unit1 blue_green
+    "nop ; nop ; ldtmu.rf18", // unit1 red_alpha
+
+    /* Unpack unit 0's texel (the sub/fadd trick). */
+
+    /* Unpack unit 1's texel. */
+    "sub rf20, rf20, rf20 ; nop",
+    "sub rf21, rf21, rf21 ; nop",
+    "sub rf22, rf22, rf22 ; nop",
+    "sub rf23, rf23, rf23 ; nop",
+    "fadd rf20, rf20, rf19.l ; nop", // unit1 blue
+    "fadd rf21, rf21, rf19.h ; nop", // unit1 green
+    "fadd rf22, rf22, rf18.l ; nop", // unit1 red
+    "fadd rf23, rf23, rf18.h ; nop", // unit1 alpha
+
+    /* Combine: multiply all 4 channels (GL_MODULATE). */
+    "nop ; fmul r0, rf4.l, rf20",
+    "nop ; fmul rf7, r0, rf24",
+    "nop ; fmul r0, rf4.h, rf21",
+    "nop ; fmul rf8, r0, rf25",
+    "nop ; fmul r0, rf3.l, rf22",
+    "nop ; fmul rf9, r0, rf26",
+    "nop ; fmul r0, rf3.h, rf23",
+    "nop ; fmul rf10, r0, rf27",
+
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // final thread-end thrsw
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
 
 /*
  * GL_DECAL for multitexture. Byte-for-byte identical fetch/unpack section
@@ -3911,116 +2431,6 @@ static const char* g_fragment_shader_multitexture_replace_assembly[] = {
 };
 
 /*
- * Multitextured + SRC_ALPHA/INV_SRC_ALPHA translucency, GL_MODULATE
- * combine only -- see v3d_shader_assembler.h's own comment on
- * V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT. A splice:
- * lines through the MODULATE combine below are BYTE-IDENTICAL to
- * g_fragment_shader_multitexture_modulate_blend_assembly's prefix (same
- * 2-TMU fetch, same channel unpack, same combine) up to the point where IT
- * has rf7-10 = combined blue/green/red/alpha; from there on the tail is
- * g_fragment_shader_textured_blend_assembly's, verbatim (glColor-alpha
- * uniform read, ldtlb dest-read, SRC_ALPHA/INV_SRC_ALPHA LERP,
- * writeback) -- that shader reaches the exact same rf7-10 shape via a
- * different (single-TMU) prefix, so its tail splices on unchanged, the
- * same reasoning as g_fragment_shader_textured_smooth_blend_assembly
- * above.
- */
-static const char* g_fragment_shader_multitexture_modulate_translucent_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-
-    /* Combine: GL_MODULATE (same as g_fragment_shader_multitexture_assembly). */
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
-
-    /* Blend tail from here on: g_fragment_shader_textured_blend_assembly's
-     * own SRC_ALPHA/INV_SRC_ALPHA LERP, verbatim (see that shader for the
-     * per-line rationale -- not re-derived here). */
-    "nop ; nop ; ldunifrf.rf24", // rf24 = glColor alpha multiplier (uniform 0)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = final alpha = combined_tex_alpha * color_alpha
-
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // reuse rf24 (color-alpha no longer needed) for 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-
-    /* Destination term paired by REGISTER INDEX, exactly as in
-     * g_fragment_shader_textured_blend_assembly's own blend tail (which
-     * this shader copies verbatim, see its comment above): same register
-     * usage, rf7/rf9/rf27/rf29/rf24. */
-    "nop ; fmul r0, rf7, rf10",   // tex_blue * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-
-    "nop ; fmul r0, rf9, rf10",   // tex_red * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-/*
  * Blend-aware counterparts of the 3 combine variants above, for
  * mglDrawMultitexBuffer(GL_ONE, GL_SRC_COLOR|GL_SRC_ALPHA, ...) -- an
  * ADDITIVE blend, result = src*ONE + dst*dstFactor, NOT the translucency
@@ -4052,285 +2462,6 @@ static const char* g_fragment_shader_multitexture_modulate_translucent_assembly[
  * unpacked into separately-named dst_red/green/blue/alpha registers and
  * explicitly paired against the matching-named src channel below.
  */
-static const char* g_fragment_shader_multitexture_modulate_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-
-    /* Combine: GL_MODULATE (same as g_fragment_shader_multitexture_assembly). */
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
-
-    /* Blend: read dst from the tile buffer, additive-blend against src (rf7-10). */
-    "nop ; nop ; ldunifrf.rf24", // rf24 = blend dst-factor flag (0.0=SRC_COLOR, 1.0=SRC_ALPHA)
-
-    "nop ; nop ; ldtlb.rf25", // rf25 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // rf26 = packed dst (b,a)
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-
-    /* result_blue = src_blue + dst_blue * lerp(src_blue, src_alpha, flag) */
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-
-    /* result_alpha = src_alpha + dst_alpha * src_alpha -- computed LAST, consumes original rf10. */
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_multitexture_decal_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-
-    /* Combine: GL_DECAL (same as g_fragment_shader_multitexture_decal_assembly). */
-    "fsub r0, rf20, rf7 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf7, rf7, r0 ; nop",
-
-    "fsub r0, rf21, rf8 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf8, rf8, r0 ; nop",
-
-    "fsub r0, rf22, rf9 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf9, rf9, r0 ; nop",
-
-    /* Blend -- identical shape to g_fragment_shader_multitexture_modulate_blend_assembly's own block. */
-    "nop ; nop ; ldunifrf.rf24",
-
-    "nop ; nop ; ldtlb.rf25",
-    "nop ; nop ; ldtlb.rf26",
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop",
-    "fadd rf28, rf28, rf25.h ; nop",
-    "fadd rf29, rf29, rf26.l ; nop",
-    "fadd rf30, rf30, rf26.h ; nop",
-
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
-static const char* g_fragment_shader_multitexture_replace_blend_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-
-    /* Combine: GL_REPLACE (same as g_fragment_shader_multitexture_replace_assembly). */
-    "or rf7, rf20, rf20 ; nop",
-    "or rf8, rf21, rf21 ; nop",
-    "or rf9, rf22, rf22 ; nop",
-    "or rf10, rf23, rf23 ; nop",
-
-    /* Blend -- identical shape to the other two blend variants' own block. */
-    "nop ; nop ; ldunifrf.rf24",
-
-    "nop ; nop ; ldtlb.rf25",
-    "nop ; nop ; ldtlb.rf26",
-
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop",
-    "fadd rf28, rf28, rf25.h ; nop",
-    "fadd rf29, rf29, rf26.l ; nop",
-    "fadd rf30, rf30, rf26.h ; nop",
-
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /*
  * Fragment side of combined GL_MODULATE. The S/T-reconstruction-and-TMU-
  * fetch section (up through the two `ldtmu` loads) is BYTE-FOR-BYTE the
@@ -4384,6 +2515,66 @@ static const char* g_fragment_shader_textured_smooth_assembly[] = {
 
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
+
+    "nop ; nop ; ldvary.r0",    // load a/w
+    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
+
+    /* modulate: texel component * vertex-color component. The CPU side
+     * (draw.c's texbuf/texbuf2 population) swaps which value (b vs r) it
+     * writes into which buffer slot, to compensate for a cross-wiring
+     * between the two split attribute records -- see draw.c's own comment
+     * on that swap -- so rf20/rf21/rf22/rf23 hold true vertex
+     * red/green/blue/alpha here. */
+    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
+    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+/*
+ * TEXTURED, SMOOTH, GL_BLEND. Derived from textured_smooth.
+ * rf7/rf8/rf9/rf10 are red/green/blue/alpha: uniform 0 is fixed_color's byte 0,
+ * which is red, and it multiplies rf7.
+ */
+static const char* g_fragment_shader_textured_smooth_envblend_assembly[] = {
+    /* [unchanged from g_fragment_shader_assembly] S/T reconstruction. */
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf5, r1, r5 ; nop",
+
+    /* [unchanged] wait, write T/S into TMU, thrsw pair, ldtmu x2. */
+    "nop ; nop",
+    "or tmut, rf5, rf5 ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "or tmus, rf6, rf6 ; nop",
+    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
+    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
+
+    /* Color-varying reads happen here, after ldtmu rather than before;
+     * the position is inert either way.
+     *
+     * The 6 floats per vertex this shader consumes (s,t,r,g,b,a) cannot be
+     * declared as ONE attribute record: the hardware's vec_size field is
+     * only 2 bits, so 4 components is the absolute maximum a single
+     * attribute record can represent. draw.c therefore splits them into
+     * two records, 4 + 2 components (see its glShaderStateAttributeRecord
+     * call site and v3d_vertex.h). */
+    "nop ; nop ; ldvary.r0",    // load r/w
+    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
+    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
+
+    "nop ; nop ; ldvary.r0",    // load g/w
+    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
+    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
+
+    "nop ; nop ; ldvary.r0",    // load b/w
+    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
     "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",    // load a/w
@@ -4396,15 +2587,99 @@ static const char* g_fragment_shader_textured_smooth_assembly[] = {
      * between the two split attribute records -- see draw.c's own comment
      * on that swap -- so rf20/rf21/rf22/rf23 hold true vertex
      * red/green/blue/alpha here. */
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    /* GL_BLEND: Cv = Cp + Cs*(Cc - Cp). The primary colour is already in
+     * rf20..rf23 from the varyings; the three environment-colour words are
+     * this shader's ONLY uniforms past the two TMU config words. */
+    "nop ; nop ; ldunifrf.rf13",
+    "nop ; nop ; ldunifrf.rf14",
+    "nop ; nop ; ldunifrf.rf15",
+    "fsub rf13, rf13, rf20 ; nop",
+    "fsub rf14, rf14, rf21 ; nop",
+    "fsub rf15, rf15, rf22 ; nop",
+    "nop ; fmul r0, rf4.l, rf13",
+    "nop ; fmul r1, rf4.h, rf14",
+    "nop ; fmul r2, rf3.l, rf15",
+    "fadd rf7, rf20, r0 ; nop",
+    "fadd rf8, rf21, r1 ; nop",
+    "fadd rf9, rf22, r2 ; nop",
+    "nop ; fmul rf10, rf3.h, rf23",
 
     "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
     "vfpack tlb, rf9, rf10 ; nop",
     "nop                   ; nop",
 };
+
+
+/*
+ * TEXTURED, SMOOTH, GL_ADD. Derived from textured_smooth.
+ * rf7/rf8/rf9/rf10 are red/green/blue/alpha: uniform 0 is fixed_color's byte 0,
+ * which is red, and it multiplies rf7.
+ */
+static const char* g_fragment_shader_textured_smooth_envadd_assembly[] = {
+    /* [unchanged from g_fragment_shader_assembly] S/T reconstruction. */
+    "nop ; nop ; ldvary.r0 ; wrtmuc",
+    "nop ; fmul r1, r0, rf0 ; wrtmuc",
+    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf5, r1, r5 ; nop",
+
+    /* [unchanged] wait, write T/S into TMU, thrsw pair, ldtmu x2. */
+    "nop ; nop",
+    "or tmut, rf5, rf5 ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "or tmus, rf6, rf6 ; nop",
+    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
+    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
+
+    /* Color-varying reads happen here, after ldtmu rather than before;
+     * the position is inert either way.
+     *
+     * The 6 floats per vertex this shader consumes (s,t,r,g,b,a) cannot be
+     * declared as ONE attribute record: the hardware's vec_size field is
+     * only 2 bits, so 4 components is the absolute maximum a single
+     * attribute record can represent. draw.c therefore splits them into
+     * two records, 4 + 2 components (see its glShaderStateAttributeRecord
+     * call site and v3d_vertex.h). */
+    "nop ; nop ; ldvary.r0",    // load r/w
+    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
+    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
+
+    "nop ; nop ; ldvary.r0",    // load g/w
+    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
+    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
+
+    "nop ; nop ; ldvary.r0",    // load b/w
+    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
+    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+
+    "nop ; nop ; ldvary.r0",    // load a/w
+    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
+    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+
+    /* modulate: texel component * vertex-color component. The CPU side
+     * (draw.c's texbuf/texbuf2 population) swaps which value (b vs r) it
+     * writes into which buffer slot, to compensate for a cross-wiring
+     * between the two split attribute records -- see draw.c's own comment
+     * on that swap -- so rf20/rf21/rf22/rf23 hold true vertex
+     * red/green/blue/alpha here. */
+    /* GL_ADD: Cv = Cp + Cs, Av = Ap * As. The combine stands apart from the
+     * varying reads above rather than packing into them: each channel's
+     * combine needs the ADD alu, which those instructions' fadds already
+     * occupy. */
+    "or rf11, 0x3f800000, 0x3f800000 ; nop",
+    "fadd rf7, rf20, rf4.l ; nop",
+    "fadd rf8, rf21, rf4.h ; nop",
+    "fadd rf9, rf22, rf3.l ; nop",
+    "nop ; fmul rf10, rf3.h, rf23",
+    "fmin rf7, rf7, rf11 ; nop",
+    "fmin rf8, rf8, rf11 ; nop",
+    "fmin rf9, rf9, rf11 ; nop",
+
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
 
 /*
  * GL_FOG, textured. Takes VERTEX_TEXTURED/COORDINATE_TEXTURED unchanged
@@ -4440,19 +2715,12 @@ static const char* g_fragment_shader_textured_fog_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
-
-    /* COLOUR MODULATION -- multiplies the texel by glColor, as in the
-     * non-fog family; see g_fragment_shader_textured_alphatest_assembly for
-     * the full derivation. Without it a FLAT textured draw with fog would
-     * discard glColor, RGB and alpha alike.
+    /* COLOUR MODULATION, FUSED WITH THE UNPACK. Eight instructions, not
+     * sixteen: the fmul takes the unpack modifier on its own source, so zeroing
+     * rf7-rf10 and widening the texel halves into them beforehand buys nothing
+     * -- g_fragment_shader_textured_smooth_assembly already modulates this way.
+     * Same four uniforms in the same order, read into rf20-rf23, which are dead
+     * in this shader.
      *
      * Placed BEFORE the fog block for two independent reasons: draw.c writes
      * the colour words ahead of the fog words, so the read order must match;
@@ -4462,16 +2730,15 @@ static const char* g_fragment_shader_textured_fog_assembly[] = {
      *
      * The stream for this family is
      *   [TMU][TMU][r][g][b][a][fog A][fog B][fog C][fog D][fog M][fog r][fog g]
-     *   [fog b]  (+ [alpha_ref][TLB cfg] for the alphatest variants)
-     * rf5 is dead after the TMU requests above. */
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+     *   [fog b]  (+ [alpha_ref][TLB cfg] for the alphatest variants) */
+    "nop ; nop ; ldunifrf.rf20",
+    "nop ; nop ; ldunifrf.rf21",
+    "nop ; nop ; ldunifrf.rf22",
+    "nop ; nop ; ldunifrf.rf23",
+    "nop ; fmul rf7, rf4.l, rf20",  // rf7  = blue  * glColor
+    "nop ; fmul rf8, rf4.h, rf21",  // rf8  = green * glColor
+    "nop ; fmul rf9, rf3.l, rf22",  // rf9  = red   * glColor
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // rf10 = alpha * glColor
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -4483,13 +2750,10 @@ static const char* g_fragment_shader_textured_fog_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -4504,16 +2768,13 @@ static const char* g_fragment_shader_textured_fog_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
     "fadd rf9, rf9, rf12 ; nop",
@@ -4542,14 +2803,6 @@ static const char* g_fragment_shader_textured_alphatest_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION. Without this block the shader would emit the texel
      * UNMODULATED and ignore glColor entirely -- and, with GL_MODULATE, hand
@@ -4578,15 +2831,11 @@ static const char* g_fragment_shader_textured_alphatest_assembly[] = {
      * layout rather than fixed_color's logical order, which is why rf7 is
      * labelled blue above. */
     "nop ; nop ; ldunifrf.rf5",   // colour word 0 -> rf7
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",   // colour word 1 -> rf8
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",   // colour word 2 -> rf9
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",   // colour word 3 -> rf10, the alpha the blend unit reads
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
 
@@ -4620,26 +2869,14 @@ static const char* g_fragment_shader_textured_alphatest_greater_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf10, rf15 ; nop", // IFA true means threshold >= alpha (alpha <= threshold)
     "setmsf.ifa -, 0 ; nop",          // discard when alpha <= threshold; keep when alpha > threshold
 
@@ -4677,26 +2914,14 @@ static const char* g_fragment_shader_textured_alphatest_less_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf15, rf10 ; nop", // IFA true means alpha >= threshold
     "setmsf.ifa -, 0 ; nop",          // discard when alpha >= threshold; keep when alpha < threshold
 
@@ -4724,26 +2949,14 @@ static const char* g_fragment_shader_textured_alphatest_lequal_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf10, rf15 ; nop", // IFA true means alpha <= threshold
     "setmsf.ifna -, 0 ; nop",         // discard when alpha > threshold; keep when alpha <= threshold
 
@@ -4771,26 +2984,14 @@ static const char* g_fragment_shader_textured_alphatest_equal_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushz -, rf15, rf10 ; nop", // Z flag: IFA true means alpha == threshold
     "setmsf.ifna -, 0 ; nop",         // discard when alpha != threshold
 
@@ -4818,26 +3019,14 @@ static const char* g_fragment_shader_textured_alphatest_notequal_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushz -, rf15, rf10 ; nop", // Z flag: IFA true means alpha == threshold
     "setmsf.ifa -, 0 ; nop",          // discard when alpha == threshold
 
@@ -4866,29 +3055,17 @@ static const char* g_fragment_shader_textured_alphatest_never_assembly[] = {
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* colour modulation: see g_fragment_shader_textured_alphatest_assembly.
      * Kept even here, where every fragment is discarded, because the uniform
      * stream layout must be identical across all seven variants of this family
      * -- draw.c writes these four words for the whole class. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf15",
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold (deliberately unread)
     "setmsf -, 0 ; nop",         // discard every fragment, unconditionally
 
     /* Passthrough Z write: see the untextured GL_GREATER variant for the
@@ -4937,18 +3114,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_greater_assembly[
 
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf10, rf15 ; nop", // IFA true means threshold >= alpha (alpha <= threshold)
     "setmsf.ifa -, 0 ; nop",          // discard when alpha <= threshold; keep when alpha > threshold
 
@@ -4994,18 +3168,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_assembly[] = {
 
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf15, rf10 ; nop", // IFA true means alpha >= threshold
     "setmsf.ifna -, 0 ; nop",         // discard when alpha < threshold; keep when alpha >= threshold
 
@@ -5056,18 +3227,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_less_assembly[] =
 
     "nop ; nop ; ldvary.r0",   // load b/w
     "nop ; fmul r1, r0, rf0",  // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf15, rf10 ; nop", // IFA true means alpha >= threshold
     "setmsf.ifa -, 0 ; nop",          // discard when alpha >= threshold; keep when alpha < threshold
 
@@ -5106,18 +3274,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_lequal_assembly[]
 
     "nop ; nop ; ldvary.r0",   // load b/w
     "nop ; fmul r1, r0, rf0",  // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushc -, rf10, rf15 ; nop", // IFA true means alpha <= threshold
     "setmsf.ifna -, 0 ; nop",         // discard when alpha > threshold; keep when alpha <= threshold
 
@@ -5156,18 +3321,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_equal_assembly[] 
 
     "nop ; nop ; ldvary.r0",   // load b/w
     "nop ; fmul r1, r0, rf0",  // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushz -, rf15, rf10 ; nop", // Z flag: IFA true means alpha == threshold
     "setmsf.ifna -, 0 ; nop",         // discard when alpha != threshold
 
@@ -5206,18 +3368,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_notequal_assembly
 
     "nop ; nop ; ldvary.r0",   // load b/w
     "nop ; fmul r1, r0, rf0",  // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold
     "fcmp.pushz -, rf15, rf10 ; nop", // Z flag: IFA true means alpha == threshold
     "setmsf.ifa -, 0 ; nop",          // discard when alpha == threshold
 
@@ -5257,18 +3416,15 @@ static const char* g_fragment_shader_textured_smooth_alphatest_never_assembly[] 
 
     "nop ; nop ; ldvary.r0",   // load b/w
     "nop ; fmul r1, r0, rf0",  // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
 
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf15", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf15", // rf15 = alpha test threshold (deliberately unread)
     "setmsf -, 0 ; nop",         // discard every fragment, unconditionally
 
     /* Passthrough Z write: see the untextured GL_GREATER variant for the
@@ -5317,10 +3473,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_assembly[] = {
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -5335,23 +3489,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_assembly[] = {
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -5391,14 +3541,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_assembly[] = {
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -5406,13 +3548,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_assembly[] = {
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -5424,13 +3563,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -5445,23 +3581,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -5504,10 +3636,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_greater_assembly[]
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -5522,23 +3652,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_greater_assembly[]
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifa -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -5578,14 +3704,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_greater_assembly[] =
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -5593,13 +3711,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_greater_assembly[] =
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -5611,13 +3726,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_greater_assembly[] =
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -5632,23 +3744,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_greater_assembly[] =
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -5691,10 +3799,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_less_assembly[] = 
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -5709,23 +3815,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_less_assembly[] = 
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -5765,14 +3867,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_less_assembly[] = {
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -5780,13 +3874,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_less_assembly[] = {
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -5798,13 +3889,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_less_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -5819,23 +3907,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_less_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -5878,10 +3962,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_equal_assembly[] =
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -5896,23 +3978,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_equal_assembly[] =
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -5952,14 +4030,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_equal_assembly[] = {
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -5967,13 +4037,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_equal_assembly[] = {
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -5985,13 +4052,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_equal_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6006,23 +4070,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_equal_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -6065,10 +4125,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_lequal_assembly[] 
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -6083,23 +4141,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_lequal_assembly[] 
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifna -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -6139,14 +4193,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_lequal_assembly[] = 
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -6154,13 +4200,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_lequal_assembly[] = 
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -6172,13 +4215,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_lequal_assembly[] = 
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6193,23 +4233,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_lequal_assembly[] = 
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -6252,10 +4288,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_notequal_assembly[
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -6270,23 +4304,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_notequal_assembly[
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
@@ -6326,14 +4356,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_notequal_assembly[] 
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -6341,13 +4363,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_notequal_assembly[] 
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -6359,13 +4378,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_notequal_assembly[] 
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6380,23 +4396,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_notequal_assembly[] 
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
@@ -6439,10 +4451,8 @@ static const char* g_fragment_shader_untextured_fog_alphatest_never_assembly[] =
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -6457,23 +4467,19 @@ static const char* g_fragment_shader_untextured_fog_alphatest_never_assembly[] =
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "setmsf -, 0 ; nop",
     "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
     "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
@@ -6512,14 +4518,6 @@ static const char* g_fragment_shader_textured_fog_alphatest_never_assembly[] = {
     "or tmus, rf6, rf6 ; nop",
     "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
     "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // rf7 = blue
-    "fadd rf8, rf8, rf4.h ; nop",  // rf8 = green
-    "fadd rf9, rf9, rf3.l ; nop",  // rf9 = red
-    "fadd rf10, rf10, rf3.h ; nop", // rf10 = alpha
 
     /* COLOUR MODULATION -- see
      * g_fragment_shader_textured_alphatest_assembly for the derivation and
@@ -6527,13 +4525,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_never_assembly[] = {
      * block. Fog rewrites rf7-rf9 only, so the alpha modulated here survives to
      * the blend unit. rf5 is dead after the TMU requests above. */
     "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf7, rf7, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf8, rf8, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf9, rf9, rf5",
-    "nop ; nop ; ldunifrf.rf5",
-    "nop ; fmul rf10, rf10, rf5",
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf5",
+    "nop ; fmul rf10, rf3.h, rf5 ; ldunifrf.rf11",
 
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
@@ -6545,13 +4540,10 @@ static const char* g_fragment_shader_textured_fog_alphatest_never_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6566,23 +4558,19 @@ static const char* g_fragment_shader_textured_fog_alphatest_never_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "setmsf -, 0 ; nop",
     /* Passthrough Z write: the FEP must stop writing depth because the
      * QPU does it here instead, so a discarded fragment leaves the depth
@@ -6622,13 +4610,12 @@ static const char* g_fragment_shader_untextured_smooth_fog_assembly[] = {
     "fadd rf9, r1, r5 ; nop", // rf9 = true blue
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24", // rf10 = true alpha
     /* draw.c writes 4 fixed-colour words for EVERY untextured draw,
      * including smooth ones that take their colour from varyings. They
      * are unused here, but ldunifrf is sequential: without consuming them
      * the fog loads below would read col[0..3] instead of the fog values.
      * rf24 is scratch -- nothing in this shader reads it. */
-    "nop ; nop ; ldunifrf.rf24", // consume col[0], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[1], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[2], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[3], unused
@@ -6645,10 +4632,8 @@ static const char* g_fragment_shader_untextured_smooth_fog_assembly[] = {
     "nop ; nop ; ldunifrf.rf3",             // A
     "nop ; nop ; ldunifrf.rf4",             // B
     "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // linear factor
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
     "nop ; fmul rf5, rf5, rf0",
     "nop ; fmul rf5, rf5, rf0",
     "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
@@ -6663,16 +4648,13 @@ static const char* g_fragment_shader_untextured_smooth_fog_assembly[] = {
     "sub rf4, rf4, rf4 ; nop",
     "fmax rf3, rf3, rf4 ; nop",
     "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",             // clamped to [0,1]
     "fsub rf7, rf7, rf4 ; nop",
     "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf8, rf8, rf4 ; nop",
     "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
     "fsub rf9, rf9, rf4 ; nop",
     "nop ; fmul rf9, rf9, rf3",
     "fadd rf9, rf9, rf4 ; nop",
@@ -6683,6 +4665,601 @@ static const char* g_fragment_shader_untextured_smooth_fog_assembly[] = {
     "vfpack tlb, rf9, rf10 ; nop",
     "nop                   ; nop",
 };
+
+/*
+ * UNTEXTURED SMOOTH + ALPHA TEST, seven compare functions, without and with fog.
+ * Each is the untextured smooth (or smooth fog) shader with the threshold read
+ * and that function's discard block spliced in, lifted from the FLAT untextured
+ * family. The four ldunifrf.rf24 reads step over the flat-colour words the
+ * untextured uniform branch writes whatever the shade model is, exactly as
+ * untextured_smooth_point_smooth does.
+ */
+static const char* g_fragment_shader_untextured_smooth_alphatest_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf15, rf10 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_greater_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf10, rf15 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_less_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf15, rf10 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_equal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushz -, rf15, rf10 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_lequal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf10, rf15 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_notequal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "fcmp.pushz -, rf15, rf10 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_alphatest_never_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf15",
+    "setmsf -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf15, rf10 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_greater_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf10, rf15 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_less_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf15, rf10 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_equal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushz -, rf15, rf10 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_lequal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushc -, rf10, rf15 ; nop",
+    "setmsf.ifna -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_notequal_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "fcmp.pushz -, rf15, rf10 ; nop",
+    "setmsf.ifa -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
+static const char* g_fragment_shader_untextured_smooth_fog_alphatest_never_assembly[] = {
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf7, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf8, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf9, r1, r5 ; nop",
+    "nop ; nop ; ldvary.r0",
+    "nop ; fmul r1, r0, rf0",
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf24",
+    "nop ; nop ; ldunifrf.rf3",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0",
+    "fadd rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf4, rf4, rf0 ; ldunifrf.rf5",
+    "nop ; fmul rf5, rf5, rf0",
+    "nop ; fmul rf5, rf5, rf0",
+    "fadd rf4, rf4, rf5 ; nop",
+    "or exp, rf4, rf4 ; nop",
+    "nop ; nop",
+    "nop ; nop ; ldunifrf.rf4",
+    "nop ; fmul rf3, rf3, rf4",
+    "or rf5, 0x3f800000, 0x3f800000 ; nop",
+    "fsub rf5, rf5, rf4 ; nop",
+    "nop ; fmul rf5, rf5, r4",
+    "fadd rf3, rf3, rf5 ; nop",
+    "sub rf4, rf4, rf4 ; nop",
+    "fmax rf3, rf3, rf4 ; nop",
+    "or rf4, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf3, rf3, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf7, rf7, rf4 ; nop",
+    "nop ; fmul rf7, rf7, rf3",
+    "fadd rf7, rf7, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf8, rf8, rf4 ; nop",
+    "nop ; fmul rf8, rf8, rf3",
+    "fadd rf8, rf8, rf4 ; nop ; ldunifrf.rf4",
+    "fsub rf9, rf9, rf4 ; nop",
+    "nop ; fmul rf9, rf9, rf3",
+    "fadd rf9, rf9, rf4 ; nop ; ldunifrf.rf15",
+    "setmsf -, 0 ; nop",
+    "nop ; nop ; thrsw",
+    "nop ; nop ; thrsw",
+    "nop ; nop",
+    "or tlbu, rf10, rf10 ; nop",
+    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
+    "vfpack tlb, rf9, rf10 ; nop",
+    "nop                   ; nop",
+};
+
 /*
  * Textured + smooth + fog. The texel x vertex-colour modulate is untouched;
  * fog is applied to its result, so it composes exactly as the flat textured
@@ -6708,14 +5285,12 @@ static const char* g_fragment_shader_textured_smooth_fog_assembly[] = {
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -6726,13 +5301,10 @@ static const char* g_fragment_shader_textured_smooth_fog_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6747,16 +5319,13 @@ static const char* g_fragment_shader_textured_smooth_fog_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
     "fadd rf9, rf9, rf12 ; nop",
@@ -6789,14 +5358,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_assembly[] = 
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -6807,13 +5374,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_assembly[] = 
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6828,23 +5392,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_assembly[] = 
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -6882,14 +5442,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_greater_assem
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -6900,13 +5458,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_greater_assem
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -6921,23 +5476,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_greater_assem
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -6975,14 +5526,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_less_assembly
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -6993,13 +5542,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_less_assembly
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7014,23 +5560,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_less_assembly
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -7068,14 +5610,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_equal_assembl
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7086,13 +5626,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_equal_assembl
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7107,23 +5644,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_equal_assembl
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -7161,14 +5694,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_lequal_assemb
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7179,13 +5710,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_lequal_assemb
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7200,23 +5728,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_lequal_assemb
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushc -, rf10, rf15 ; nop",
     "setmsf.ifna -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -7254,14 +5778,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_notequal_asse
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7272,13 +5794,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_notequal_asse
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7293,23 +5812,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_notequal_asse
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "fcmp.pushz -, rf15, rf10 ; nop",
     "setmsf.ifa -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
@@ -7347,14 +5862,12 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_never_assembl
     "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21", // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20", // rf23 = true vertex alpha
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7365,13 +5878,10 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_never_assembl
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7386,23 +5896,19 @@ static const char* g_fragment_shader_textured_smooth_fog_alphatest_never_assembl
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
+    "fadd rf9, rf9, rf12 ; nop ; ldunifrf.rf15",
     /* The alpha threshold load sits BELOW the fog block: draw.c writes the
      * eight fog words before alpha_ref, so this load must follow them or the
      * whole uniform stream shifts and tlbu takes the wrong TLB config word. */
-    "nop ; nop ; ldunifrf.rf15",
     "setmsf -, 0 ; nop",
     /* Passthrough Z write: the QPU takes over the depth write so a
      * discarded fragment leaves the depth buffer alone. After the
@@ -7459,14 +5965,6 @@ static const char* g_fragment_shader_multitexture_fog_assembly[] = {
     "nop ; nop ; ldtmu.rf3",  // unit0 red_alpha
     "nop ; nop ; ldtmu.rf19", // unit1 blue_green
     "nop ; nop ; ldtmu.rf18", // unit1 red_alpha
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",   // unit0 blue
-    "fadd rf8, rf8, rf4.h ; nop",   // unit0 green
-    "fadd rf9, rf9, rf3.l ; nop",   // unit0 red
-    "fadd rf10, rf10, rf3.h ; nop", // unit0 alpha
     "sub rf20, rf20, rf20 ; nop",
     "sub rf21, rf21, rf21 ; nop",
     "sub rf22, rf22, rf22 ; nop",
@@ -7475,10 +5973,10 @@ static const char* g_fragment_shader_multitexture_fog_assembly[] = {
     "fadd rf21, rf21, rf19.h ; nop", // unit1 green
     "fadd rf22, rf22, rf18.l ; nop", // unit1 red
     "fadd rf23, rf23, rf18.h ; nop", // unit1 alpha
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
+    "nop ; fmul rf7, rf4.l, rf20",
+    "nop ; fmul rf8, rf4.h, rf21",
+    "nop ; fmul rf9, rf3.l, rf22",
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf11",
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7489,13 +5987,10 @@ static const char* g_fragment_shader_multitexture_fog_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7510,16 +6005,13 @@ static const char* g_fragment_shader_multitexture_fog_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
     "fadd rf9, rf9, rf12 ; nop",
@@ -7584,7 +6076,7 @@ static const char* g_fragment_shader_multitexture_decal_fog_assembly[] = {
     "fadd rf8, rf8, r0 ; nop",
     "fsub r0, rf22, rf9 ; nop",
     "nop ; fmul r0, r0, rf23",
-    "fadd rf9, rf9, r0 ; nop",
+    "fadd rf9, rf9, r0 ; nop ; ldunifrf.rf11",
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7595,13 +6087,10 @@ static const char* g_fragment_shader_multitexture_decal_fog_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7616,16 +6105,13 @@ static const char* g_fragment_shader_multitexture_decal_fog_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
     "fadd rf9, rf9, rf12 ; nop",
@@ -7685,7 +6171,7 @@ static const char* g_fragment_shader_multitexture_replace_fog_assembly[] = {
     "or rf7, rf20, rf20 ; nop",
     "or rf8, rf21, rf21 ; nop",
     "or rf9, rf22, rf22 ; nop",
-    "or rf10, rf23, rf23 ; nop",
+    "or rf10, rf23, rf23 ; nop ; ldunifrf.rf11",
     /* Unified fog factor: all three GL modes from uniforms.
      *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
      * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
@@ -7696,13 +6182,10 @@ static const char* g_fragment_shader_multitexture_replace_fog_assembly[] = {
      *
      * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
      * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
     "nop ; nop ; ldunifrf.rf12",             // B
     "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
+    "fadd rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // linear factor
+    "nop ; fmul rf12, rf12, rf0 ; ldunifrf.rf13",
     "nop ; fmul rf13, rf13, rf0",
     "nop ; fmul rf13, rf13, rf0",
     "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
@@ -7717,16 +6200,13 @@ static const char* g_fragment_shader_multitexture_replace_fog_assembly[] = {
     "sub rf12, rf12, rf12 ; nop",
     "fmax rf11, rf11, rf12 ; nop",
     "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
+    "fmin rf11, rf11, rf12 ; nop ; ldunifrf.rf12",             // clamped to [0,1]
     "fsub rf7, rf7, rf12 ; nop",
     "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
+    "fadd rf7, rf7, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf8, rf8, rf12 ; nop",
     "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
+    "fadd rf8, rf8, rf12 ; nop ; ldunifrf.rf12",
     "fsub rf9, rf9, rf12 ; nop",
     "nop ; fmul rf9, rf9, rf11",
     "fadd rf9, rf9, rf12 ; nop",
@@ -7736,250 +6216,2623 @@ static const char* g_fragment_shader_multitexture_replace_fog_assembly[] = {
 };
 
 /* ==================================================================
- * SOFTWARE-BLEND FOG
+ * LIT VERTEX SHADERS  --  code slots 64 and 65
  *
- * Fog for the blend families whose fog block can go straight in before
- * the first ldtlb: source colour final in rf7-rf9, no uniforms consumed
- * after that point, and no clash between the fog block's scratch and the
- * blend math.
+ * These are VERTEX shaders sitting in the middle of the fragment-shader
+ * region of this file, and that is deliberate rather than untidy: a code
+ * slot is TYPE-AGNOSTIC. draw.c sets
+ * fragment_shader_code_address_rshift_3 and
+ * vertex_shader_code_address_rshift_3 as two INDEPENDENT addresses into
+ * the same shader_code_mem, and the layout already interleaves the two
+ * kinds (slot 0 vertex, 1 coordinate, 2 fragment, 3 fragment, 4 vertex).
+ * So a reclaimed fragment slot can host a vertex shader, and these two
+ * sit in reclaimed slots rather than appended ones precisely so that nothing
+ * renumbers: V3D_MAX_SHADER_VARIANTS stays 114 and every offset
+ * literal keeps its value. The allocation does not enter into it -- it is
+ * sized from the packed shaders rather than from a 114 * 1024 literal.
  *
- * Like the software-blend shaders they extend, no draw reaches these:
- * they are assembled and uploaded, but the draw path never selects them.
+ * Slots 90 and 91 are dead. Their ADJACENCY buys nothing: the shaders are
+ * packed end to end with a 256-instruction buffer, so a long variant simply
+ * takes more bytes.
  *
- * The eight remaining blend variants (untextured_blend*,
- * untextured_smooth_blend*, textured_smooth_blend_add and
- * textured_smooth_blend_srcalpha_one) are NOT here: their blend math uses
- * those scratch registers itself, so fog needs different ones there.
+ * DERIVATION. Each of these is g_vertex_shader_smooth_assembly (or its
+ * textured twin) with the per-vertex COLOUR input replaced by the
+ * per-vertex NORMAL. The whole matrix-multiply core, the screen-space
+ * conversion and the Z scale/offset block are byte-for-byte the
+ * originals, copied rather than re-derived, for the reason that shader's
+ * own comment gives: a transcription error must not be able to creep into
+ * the part of the shader that is unrelated to what changes.
+ *
+ * Dropping the colour input is what pays for the normal. GL fixed-function
+ * lighting ignores the per-vertex colour entirely, so a lit draw carries
+ * no colour attribute record -- which means the normal costs no extra
+ * record, no extra varying, and FEWER VPM input words than the unlit
+ * shader it came from (6 against 7 untextured, 8 against 9 textured).
+ *
+ * THESE COMPUTE THE LIGHTING. The bodies below normalize and evaluate the GL
+ * terms, and milestone_l76_lighting_no_lights measures the resulting colours
+ * against the equation on hardware.
  * ================================================================== */
 
-/*
- * textured_blend + fog.
- *
- * The fog lerp is placed BEFORE the first ldtlb, not before the colour
- * vfpacks as in the non-blending fog variants. That is the whole point:
- * GL applies fog to the FRAGMENT, and blending happens afterwards against
- * the destination, so fogging the already-blended result would fog the
- * destination's contribution too. At this point rf7/rf8/rf9 hold the final
- * source colour and the destination has not been read yet.
- *
- * This shader consumes NO uniform words after the insertion point, so the
- * fog loads stay in stream order, and its blend math does not touch
- * the fog block's rf11/rf12/rf13, so the two cannot collide.
- */
-static const char* g_fragment_shader_textured_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // tex_blue
-    "fadd rf8, rf8, rf4.h ; nop",  // tex_green
-    "fadd rf9, rf9, rf3.l ; nop",  // tex_red
-    "fadd rf10, rf10, rf3.h ; nop", // tex_alpha
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color blue multiplier (uniform 0)
-    "nop ; fmul rf7, rf7, rf5", // rf7 = tex_blue * color_blue
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color green multiplier (uniform 1)
-    "nop ; fmul rf8, rf8, rf5", // rf8 = tex_green * color_green
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color red multiplier (uniform 2)
-    "nop ; fmul rf9, rf9, rf5", // rf9 = tex_red * color_red
-    "nop ; nop ; ldunifrf.rf24", // rf24 = glColor alpha multiplier (uniform 3)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = final alpha = tex_alpha * color_alpha
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
+static const char* g_vertex_shader_lit_assembly[] =
+{
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf16, since rf14/15 are
+     * already taken by color b/a in this variant (see
+     * g_vertex_shader_assembly's own comment). */
+    "nop ; nop ; ldunifrf.rf16", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    /* THE NORMAL, object space, in the three registers that hold colour
+     * r/g/b -- chosen for the same reason: the matrix-multiply section
+     * below never touches rf11/rf12/rf14, so a value parked here survives
+     * it without a save/restore.
      *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // reuse rf24 (color-alpha no longer needed) for 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-    "nop ; fmul r0, rf7, rf10",   // tex_blue * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-    "nop ; fmul r0, rf9, rf10",   // tex_red * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * textured_smooth_blend + fog.
- *
- * The fog lerp is placed BEFORE the first ldtlb, not before the colour
- * vfpacks as in the non-blending fog variants. That is the whole point:
- * GL applies fog to the FRAGMENT, and blending happens afterwards against
- * the destination, so fogging the already-blended result would fog the
- * destination's contribution too. At this point rf7/rf8/rf9 hold the final
- * source colour and the destination has not been read yet.
- *
- * This shader consumes NO uniform words after the insertion point, so the
- * fog loads stay in stream order, and its blend math does not touch
- * the fog block's rf11/rf12/rf13, so the two cannot collide.
- */
-static const char* g_fragment_shader_textured_smooth_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
+     * VPM input words are 0-2 position + 3-5 normal = SIX, one word FEWER
+     * than the smooth shader this is derived from, because the lit path
+     * drops the per-vertex colour record (GL lighting ignores vertex
+     * colour). So six words still fit one 8-word VPM sector and
+     * vertex_shader_input_vpm_segment_size stays 1. */
+    "ldvpmv_in rf11,  3 ; nop", // normal x
+    "ldvpmv_in rf12,  4 ; nop", // normal y
+    "ldvpmv_in rf14,  5 ; nop", // normal z
+
+    /* Alpha, constant 1.0 in the register that holds colour a. */
+    "or rf15, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
     "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf16", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf23",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf24",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf23",
+    "fadd rf13, rf13, rf24 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf11, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf11, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf11, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
      *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-    "nop ; fmul r0, rf7, rf10",   // true red * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-    "nop ; fmul r0, rf9, rf10",   // true blue * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf18, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf19, r5, rf4 ; nop ; ldunif",
+    "fsub rf20, r5, rf5 ; nop ; ldunif",
+    "fsub rf21, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf19, rf19",
+    "nop ; fmul r1, rf20, rf20",
+    "fadd r0, r0, r1 ; fmul r2, rf21, rf21",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf19, rf19, r4",
+    "nop ; fmul rf20, rf20, r4",
+    "nop ; fmul rf21, rf21, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf25, rf19, rf19 ; nop",
+    "or rf26, rf20, rf20 ; nop",
+    "fadd rf27, rf21, rf3 ; nop",
+
+    "nop ; fmul r0, rf25, rf25",
+    "nop ; fmul r1, rf26, rf26",
+    "fadd r0, r0, r1 ; fmul r2, rf27, rf27",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf25, rf25, r4",
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf19",
+    "nop ; fmul r1, rf8, rf20",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf21",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf28, r0, rf18 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf25",
+    "nop ; fmul r1, rf8, rf26",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf27",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf29, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf29, rf29 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf30, r5, rf28 ; ldunif",
+    "nop ; fmul rf31, r5, rf28 ; ldunif",
+    "nop ; fmul rf22, r5, rf28 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf30, rf30, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf22, rf22, r2 ; nop",
+    "fadd rf30, rf30, r5 ; nop ; ldunif",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf22, rf22, r5 ; nop ; ldunif",
+    "or rf15, r5, r5 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already. */
+    "fmin rf11, rf30, rf3 ; nop",
+    "fmin rf12, rf31, rf3 ; nop",
+    "fmin rf14, rf22, rf3 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // lit colour r
+    "stvpmv 5, rf12 ; nop", // lit colour g
+    "stvpmv 6, rf14 ; nop", // lit colour b
+    "stvpmv 7, rf15 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
 };
+
+/*
+ * LIT, UNTEXTURED, with GL_COLOR_MATERIAL. lit
+ * plus the K1 half of light.c's fold: the vertex colour arrives as a fourth
+ * attribute at VPM inputs 6..9 and each channel gains
+ * C * (K1base + K1diff * N.L + K1spec * spec). With a mode that tracks nothing
+ * every K1 is zero and this computes exactly what the host shader does.
+ */
+static const char* g_vertex_shader_lit_colormaterial_assembly[] = {
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf16, since rf14/15 are
+     * already taken by color b/a in this variant (see
+     * g_vertex_shader_assembly's own comment). */
+    "nop ; nop ; ldunifrf.rf16", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    /* THE NORMAL, object space, in the three registers that hold colour
+     * r/g/b -- chosen for the same reason: the matrix-multiply section
+     * below never touches rf11/rf12/rf14, so a value parked here survives
+     * it without a save/restore.
+     *
+     * VPM input words are 0-2 position + 3-5 normal = SIX, one word FEWER
+     * than the smooth shader this is derived from, because the lit path
+     * drops the per-vertex colour record (GL lighting ignores vertex
+     * colour). So six words still fit one 8-word VPM sector and
+     * vertex_shader_input_vpm_segment_size stays 1. */
+    "ldvpmv_in rf11,  3 ; nop", // normal x
+    "ldvpmv_in rf12,  4 ; nop", // normal y
+    "ldvpmv_in rf14,  5 ; nop", // normal z
+
+    /* Alpha, constant 1.0 in the register that holds colour a. */
+    "or rf15, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf16", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf23",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf24",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf23",
+    "fadd rf13, rf13, rf24 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf11, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf11, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf11, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf12, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf14, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf18, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf19, r5, rf4 ; nop ; ldunif",
+    "fsub rf20, r5, rf5 ; nop ; ldunif",
+    "fsub rf21, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf19, rf19",
+    "nop ; fmul r1, rf20, rf20",
+    "fadd r0, r0, r1 ; fmul r2, rf21, rf21",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf19, rf19, r4",
+    "nop ; fmul rf20, rf20, r4",
+    "nop ; fmul rf21, rf21, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf25, rf19, rf19 ; nop",
+    "or rf26, rf20, rf20 ; nop",
+    "fadd rf27, rf21, rf3 ; nop",
+
+    "nop ; fmul r0, rf25, rf25",
+    "nop ; fmul r1, rf26, rf26",
+    "fadd r0, r0, r1 ; fmul r2, rf27, rf27",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf25, rf25, r4",
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf19",
+    "nop ; fmul r1, rf8, rf20",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf21",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf28, r0, rf18 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf25",
+    "nop ; fmul r1, rf8, rf26",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf27",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf29, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf29, rf29 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf30, r5, rf28 ; ldunif",
+    "nop ; fmul rf31, r5, rf28 ; ldunif",
+    "nop ; fmul rf22, r5, rf28 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf30, rf30, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf22, rf22, r2 ; nop",
+    "fadd rf30, rf30, r5 ; nop ; ldunif",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf22, rf22, r5 ; nop ; ldunif",
+    "or rf15, r5, r5 ; nop",
+    /* ---- GL_COLOR_MATERIAL: the K1 half of the folded terms ---- */
+    "ldvpmv_in rf5, 6 ; nop",
+    "ldvpmv_in rf6, 7 ; nop",
+    "ldvpmv_in rf7, 8 ; nop",
+    "ldvpmv_in rf8, 9 ; nop",
+    /* k per channel: base + diffuse*N.L + specular*spec. The tail is
+     * grouped by channel, so each group is three consecutive words. */
+    "nop ; nop ; ldunif",
+    "or rf0, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf28 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf0, rf0, r0 ; nop",
+    "or rf1, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf28 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf1, rf1, r0 ; nop",
+    "or rf2, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf28 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf2, rf2, r0 ; nop",
+    /* accumulate C * k, and the alpha scale still sitting in r5 */
+    "nop ; fmul r0, rf0, rf5",
+    "nop ; fmul r1, rf1, rf6",
+    "nop ; fmul r2, rf2, rf7",
+    "fadd rf30, rf30, r0 ; nop",
+    "fadd rf31, rf31, r1 ; fmul r0, r5, rf8",
+    "fadd rf22, rf22, r2 ; nop",
+    "fadd rf15, rf15, r0 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already. */
+    "fmin rf11, rf30, rf3 ; nop",
+    "fmin rf12, rf31, rf3 ; nop",
+    "fmin rf14, rf22, rf3 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // lit colour r
+    "stvpmv 5, rf12 ; nop", // lit colour g
+    "stvpmv 6, rf14 ; nop", // lit colour b
+    "stvpmv 7, rf15 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+
+static const char* g_vertex_shader_lit_textured_assembly[] =
+{
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  3 ; nop", // s
+    "ldvpmv_in rf12,  4 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  5 ; nop", // normal x
+    "ldvpmv_in rf15,  6 ; nop", // normal y
+    "ldvpmv_in rf16,  7 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, rf3 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 6, rf14 ; nop", // lit colour r
+    "stvpmv 7, rf15 ; nop", // lit colour g
+    "stvpmv 8, rf16 ; nop", // lit colour b
+    "stvpmv 9, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+/*
+ * LIT, TEXTURED, with GL_COLOR_MATERIAL. lit_textured
+ * plus the K1 half of light.c's fold: the vertex colour arrives as a fourth
+ * attribute at VPM inputs 8..11 and each channel gains
+ * C * (K1base + K1diff * N.L + K1spec * spec). With a mode that tracks nothing
+ * every K1 is zero and this computes exactly what the host shader does.
+ */
+static const char* g_vertex_shader_lit_textured_colormaterial_assembly[] = {
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  3 ; nop", // s
+    "ldvpmv_in rf12,  4 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  5 ; nop", // normal x
+    "ldvpmv_in rf15,  6 ; nop", // normal y
+    "ldvpmv_in rf16,  7 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, rf3 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+    /* ---- GL_COLOR_MATERIAL: the K1 half of the folded terms ---- */
+    "ldvpmv_in rf5, 8 ; nop",
+    "ldvpmv_in rf6, 9 ; nop",
+    "ldvpmv_in rf7, 10 ; nop",
+    "ldvpmv_in rf8, 11 ; nop",
+    /* k per channel: base + diffuse*N.L + specular*spec. The tail is
+     * grouped by channel, so each group is three consecutive words. */
+    "nop ; nop ; ldunif",
+    "or rf0, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf0, rf0, r0 ; nop",
+    "or rf1, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf1, rf1, r0 ; nop",
+    "or rf2, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf2, rf2, r0 ; nop",
+    /* accumulate C * k, and the alpha scale still sitting in r5 */
+    "nop ; fmul r0, rf0, rf5",
+    "nop ; fmul r1, rf1, rf6",
+    "nop ; fmul r2, rf2, rf7",
+    "fadd rf31, rf31, r0 ; nop",
+    "fadd rf3, rf3, r1 ; fmul r0, r5, rf8",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf17, rf17, r0 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 6, rf14 ; nop", // lit colour r
+    "stvpmv 7, rf15 ; nop", // lit colour g
+    "stvpmv 8, rf16 ; nop", // lit colour b
+    "stvpmv 9, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+
+/*
+ * LIT, MULTITEXTURED. g_vertex_shader_lit_textured_assembly plus unit 1's
+ * texcoord pair, which is why it is derived from that rather than from
+ * g_vertex_shader_multitexture_assembly: the lighting block is 106 of these
+ * instructions and copying four is cheaper than splicing it.
+ *
+ * INPUTS  0,1,2 position | 3,4 unit 0 s,t | 5,6 unit 1 s,t | 7,8,9 normal
+ * OUTPUTS 0..3 position  | 4,5 unit 0 s,t | 6,7 unit 1 s,t | 8..11 lit colour
+ *
+ * Ten input words, so draw.c gives this shape TWO VPM input sectors.
+ *
+ * Unit 1's pair is read into rf21 and written out immediately, twice, rather
+ * than held: rf21 is the only register this shader leaves unused, and every
+ * register that falls dead after the position output is written before it.
+ */
+static const char* g_vertex_shader_lit_multitexture_assembly[] = {
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  3 ; nop", // s
+    "ldvpmv_in rf12,  4 ; nop",
+    /* UNIT 1's texcoord pair, read and written straight out. rf21 is
+     * the only register unused by this shader and every other free one
+     * is written before the position output, so there is nothing to
+     * hold these in; stvpmv addresses its slot, so writing 6 and 7 here
+     * and the rest below is committed together by the vpmwt. */
+    "ldvpmv_in rf21,  5 ; nop",
+    "stvpmv 6, rf21 ; nop",
+    "ldvpmv_in rf21,  6 ; nop",
+    "stvpmv 7, rf21 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  7 ; nop", // normal x
+    "ldvpmv_in rf15,  8 ; nop", // normal y
+    "ldvpmv_in rf16,  9 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, rf3 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 8, rf14 ; nop", // lit colour r
+    "stvpmv 9, rf15 ; nop", // lit colour g
+    "stvpmv 10, rf16 ; nop", // lit colour b
+    "stvpmv 11, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+/*
+ * LIT, MULTITEXTURED, with GL_COLOR_MATERIAL. lit_multitexture
+ * plus the K1 half of light.c's fold: the vertex colour arrives as a fourth
+ * attribute at VPM inputs 10..13 and each channel gains
+ * C * (K1base + K1diff * N.L + K1spec * spec). With a mode that tracks nothing
+ * every K1 is zero and this computes exactly what the host shader does.
+ */
+static const char* g_vertex_shader_lit_multitexture_colormaterial_assembly[] = {
+    "or rf3, 0x3f800000, 0x3f800000 ; nop", // w_m = 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  3 ; nop", // s
+    "ldvpmv_in rf12,  4 ; nop",
+    /* UNIT 1's texcoord pair, read and written straight out. rf21 is
+     * the only register unused by this shader and every other free one
+     * is written before the position output, so there is nothing to
+     * hold these in; stvpmv addresses its slot, so writing 6 and 7 here
+     * and the rest below is committed together by the vpmwt. */
+    "ldvpmv_in rf21,  5 ; nop",
+    "stvpmv 6, rf21 ; nop",
+    "ldvpmv_in rf21,  6 ; nop",
+    "stvpmv 7, rf21 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  7 ; nop", // normal x
+    "ldvpmv_in rf15,  8 ; nop", // normal y
+    "ldvpmv_in rf16,  9 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, rf3 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+    /* ---- GL_COLOR_MATERIAL: the K1 half of the folded terms ---- */
+    "ldvpmv_in rf5, 10 ; nop",
+    "ldvpmv_in rf6, 11 ; nop",
+    "ldvpmv_in rf7, 12 ; nop",
+    "ldvpmv_in rf8, 13 ; nop",
+    /* k per channel: base + diffuse*N.L + specular*spec. The tail is
+     * grouped by channel, so each group is three consecutive words. */
+    "nop ; nop ; ldunif",
+    "or rf0, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf0, rf0, r0 ; nop",
+    "or rf1, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf1, rf1, r0 ; nop",
+    "or rf2, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf2, rf2, r0 ; nop",
+    /* accumulate C * k, and the alpha scale still sitting in r5 */
+    "nop ; fmul r0, rf0, rf5",
+    "nop ; fmul r1, rf1, rf6",
+    "nop ; fmul r2, rf2, rf7",
+    "fadd rf31, rf31, r0 ; nop",
+    "fadd rf3, rf3, r1 ; fmul r0, r5, rf8",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf17, rf17, r0 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 8, rf14 ; nop", // lit colour r
+    "stvpmv 9, rf15 ; nop", // lit colour g
+    "stvpmv 10, rf16 ; nop", // lit colour b
+    "stvpmv 11, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+
+
+/*
+ * LIT, TEXTURED, REAL PER-VERTEX W. g_vertex_shader_lit_textured_assembly with
+ * three changes and nothing else: w is read from VPM index 3 rather than set to
+ * 1.0, every later input index shifts by one because draw.c widens the position
+ * record to four components for needs_real_w, and the half-vector's +1.0 is a
+ * small immediate because rf3 now holds that w.
+ *
+ * The shape it serves is the only one it can: real_w_combined requires
+ * `combined` or `smooth_alphatest`, and BOTH of those require textured and
+ * exclude multitextured -- so one shader covers every lit real-w draw, and the
+ * vex selector testing multitextured first costs nothing. No fragment shader is
+ * needed; that stage only sees interpolated varyings.
+ */
+static const char* g_vertex_shader_lit_realw_assembly[] = {
+    "ldvpmv_in rf3, 3 ; nop",   // the REAL per-vertex w, where lit_textured had 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  4 ; nop", // s
+    "ldvpmv_in rf12,  5 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  6 ; nop", // normal x
+    "ldvpmv_in rf15,  7 ; nop", // normal y
+    "ldvpmv_in rf16,  8 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, 0x3f800000 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 6, rf14 ; nop", // lit colour r
+    "stvpmv 7, rf15 ; nop", // lit colour g
+    "stvpmv 8, rf16 ; nop", // lit colour b
+    "stvpmv 9, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+/*
+ * LIT, TEXTURED, REAL PER-VERTEX W, with GL_COLOR_MATERIAL. lit_realw
+ * plus the K1 half of light.c's fold: the vertex colour arrives as a fourth
+ * attribute at VPM inputs 9..12 and each channel gains
+ * C * (K1base + K1diff * N.L + K1spec * spec). With a mode that tracks nothing
+ * every K1 is zero and this computes exactly what the host shader does.
+ */
+static const char* g_vertex_shader_lit_realw_colormaterial_assembly[] = {
+    "ldvpmv_in rf3, 3 ; nop",   // the REAL per-vertex w, where lit_textured had 1.0
+
+    "nop ; nop ; ldunifrf.rf10", // scale_p
+
+    /* Separate Y-axis screen-space scale -- rf18, since rf14-17 are
+     * already taken by color r/g/b/a in this variant. */
+    "nop ; nop ; ldunifrf.rf18", // scale_p_y
+
+    "ldvpmv_in rf0,  0 ; nop", // x_m
+    "ldvpmv_in rf1,  1 ; nop", // y_m
+    "ldvpmv_in rf2,  2 ; nop", // z_m
+
+    "ldvpmv_in rf11,  4 ; nop", // s
+    "ldvpmv_in rf12,  5 ; nop", // t
+
+    /* THE NORMAL, object space, in the registers that hold colour r/g/b,
+     * for the same reason as in the untextured variant above: the
+     * matrix-multiply section never touches them.
+     *
+     * VPM input words are 0-2 position + 3-4 s,t + 5-7 normal = EIGHT, one
+     * word fewer than the smooth textured shader, the colour record being
+     * dropped for a lit draw. Eight is exactly one sector; the field stays
+     * at the 2 the combined path already sets, which is harmless. */
+    "ldvpmv_in rf14,  6 ; nop", // normal x
+    "ldvpmv_in rf15,  7 ; nop", // normal y
+    "ldvpmv_in rf16,  8 ; nop", // normal z
+
+    /* Alpha, constant 1.0. */
+    "or rf17, 0x3f800000, 0x3f800000 ; nop", // a = 1.0
+    /* Matrix multiply -- byte-for-byte identical to g_vertex_shader_assembly. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf4, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",
+    "nop ; fmul rf5, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",
+    "nop ; fmul rf6, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",
+    "nop ; fmul rf7, rf0, r5 ; ldunif",
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf7, rf7, r0 ; nop",
+
+    "or recip, rf7, rf7 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, rf4, r4",
+    "nop ; fmul r0, r0, rf10",
+    "nop ; fmul rf8, r0, 0x43000000",
+    "fsub r0, r0, r0 ; nop",
+    "fsub r0, r0, rf5 ; nop",
+    "nop ; fmul r0, r0, r4",
+    "nop ; fmul r0, r0, rf18", // scale_p_y, not the shared scale_p
+    "nop ; fmul rf9, r0, 0x43000000",
+    "ftoin rf8, rf8 ; nop",
+    "ftoin rf9, rf9 ; nop",
+    "nop ; fmul rf13, rf6, r4",
+    /* The Z scale and offset come from the uniform stream
+     * (v3d_my_uniforms.z_scale / .z_offset, draw.c), APPENDED after the 16
+     * matrix values -- so these two reads must stay the LAST ldunif* in this
+     * shader. rf0/rf1 held x_m/y_m and are dead from the end of the matrix
+     * multiply above to the end of the shader, so no new register is needed.
+     * Two instructions of slack before first use; the matrix multiply above
+     * proves one is enough. */
+    "nop ; nop ; ldunifrf.rf19",          // viewport z scale  (context->sz)   // moved off rf0: rf0-rf2 must keep the object position
+    "nop ; nop ; ldunifrf.rf20",          // viewport z offset (context->az)
+    "nop ; fmul rf13, rf13, rf19",
+    "fadd rf13, rf13, rf20 ; nop",
+
+    "stvpmv 0, rf8 ; nop",
+    "stvpmv 1, rf9 ; nop",
+    "stvpmv 2, rf13 ; nop",
+    "stvpmv 3, r4 ; nop",
+
+    /* ---- EYE-SPACE LIGHTING. rf4..rf9 are all dead from here: rf4-rf7
+     * held the clip position and rf8/rf9 the screen x/y, both already
+     * written to the VPM above. ---- */
+    "nop ; nop ; ldunif",                   // mv11
+    "nop ; fmul rf4, rf0, r5 ; ldunif",      // mv12
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv13
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv14
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf4, rf4, r0 ; nop ; ldunif",      // mv21
+    "nop ; fmul rf5, rf0, r5 ; ldunif",      // mv22
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv23
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv24
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf5, rf5, r0 ; nop ; ldunif",      // mv31
+    "nop ; fmul rf6, rf0, r5 ; ldunif",      // mv32
+    "nop ; fmul r0, rf1, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv33
+    "nop ; fmul r0, rf2, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // mv34
+    "nop ; fmul r0, rf3, r5",
+    "fadd rf6, rf6, r0 ; nop ; ldunif",      // it11
+    "nop ; fmul rf7, rf14, r5 ; ldunif",      // it12
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it13
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf7, rf7, r0 ; nop ; ldunif",      // it21
+    "nop ; fmul rf8, rf14, r5 ; ldunif",      // it22
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it23
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf8, rf8, r0 ; nop ; ldunif",      // it31
+    "nop ; fmul rf9, rf14, r5 ; ldunif",      // it32
+    "nop ; fmul r0, rf15, r5",
+    "fadd rf9, rf9, r0 ; nop ; ldunif",      // it33
+    "nop ; fmul r0, rf16, r5",
+    "fadd rf9, rf9, r0 ; nop",
+    /* |N_eye| is what object space got wrong: it divided by |n|. */
+    "nop ; fmul r0, rf7, rf7",
+    "nop ; fmul r1, rf8, rf8",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf9",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop",
+    "nop ; fmul rf7, rf7, r4",
+    "nop ; fmul rf8, rf8, r4",
+    "nop ; fmul rf9, rf9, r4",
+
+    /* ---------------------------------------------------------------- LIGHTING
+     * Object space, one light, ambient + diffuse + specular.
+     *
+     * r4 IS FREE HERE. It carried 1/w from "or recip, rf7, rf7" up to the
+     * "stvpmv 3, r4" just above, and nothing reads it again, so both SFU
+     * lookups below can use it without disturbing the matrix core. The block
+     * sits between the position stores and the colour stores for exactly that
+     * reason.
+     *
+     * THE UNIFORM TAIL IS POSITIONAL -- ldunif carries no address. It is read
+     * in this order and the CPU writes it in this order: light position (3),
+     * view direction (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), shininess (1), diffuse product (3), specular product (3), base
+     * colour (3), alpha (1) -- SEVENTEEN words, and seventeen instructions
+     * minimum: one signal field per instruction is a hardware floor.
+     *
+     * The two trailing z_scale/z_offset ldunifrf above MUST stay the last reads
+     * before the first read here, or the tail's first word arrives as z_scale.
+     *
+     * Every operand pair keeps to at most TWO register-file reads, which is the
+     * port limit; partial products live in the accumulators r0-r2.
+     */
+
+    /* Zero, made by subtracting rf3 from itself -- the idiom the screen-space
+     * conversion above already uses. rf3 holds w_m = 1.0 and is dead from the end
+     * of the matrix multiply, so 1.0 needs no register of its own. */
+    "fsub rf22, rf3, rf3 ; nop",
+
+    /* L = light_position_object - vertex_position_object. The light arrives
+     * already carried into object space by the CPU (draw.c), once per draw,
+     * which is why no inverse matrix appears in this shader. */
+    "nop ; nop ; ldunif",
+    "fsub rf23, r5, rf4 ; nop ; ldunif",
+    "fsub rf24, r5, rf5 ; nop ; ldunif",
+    "fsub rf25, r5, rf6 ; nop",
+
+    /* |L|^2, then r4 = 1/|L|. THE NORMALIZE IS REQUIRED, not an option: the
+     * light is positional (w != 0), so GL defines the direction per vertex as
+     * normalize(P_light - P_vertex). A constant direction would flatten the
+     * specular highlight to one value across a whole surface. */
+    "nop ; fmul r0, rf23, rf23",
+    "nop ; fmul r1, rf24, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf25, rf25",
+    "fadd r0, r0, r2 ; nop",
+    /* Magic-waddr SFU, never the ALU-op rsqrt spelling: the validator's
+     * sfu_writes counter only inspects magic writes, so the ALU-op form's r4
+     * latency is unchecked and a violation would assemble clean and fail on
+     * hardware. This form ships in four fragment shaders. */
+    "or rsqrt, r0, r0 ; nop",
+    /* Exactly ONE instruction between the SFU write and the r4 read; it earns
+     * its keep by starting the view-direction reads. */
+    /* V is eye-space (0,0,1), a constant now, so H = L + z needs no
+     * uniform and the three view-direction words leave the tail. The
+     * instruction STAYS as a nop: it also fills the mandatory gap after
+     * the rsqrt above, and r4 cannot be read in the next instruction. */
+    "nop ; nop",
+    "nop ; fmul rf23, rf23, r4",
+    "nop ; fmul rf24, rf24, r4",
+    "nop ; fmul rf25, rf25, r4",
+
+    /* H = Lhat + Vobj, the half vector. V is the eye-space view direction
+     * (0,0,1) carried into object space and normalised by the CPU;
+     * GL_LIGHT_MODEL_LOCAL_VIEWER is false, so it is constant for the draw. */
+    "or rf26, rf23, rf23 ; nop",
+    "or rf27, rf24, rf24 ; nop",
+    "fadd rf28, rf25, 0x3f800000 ; nop",
+
+    "nop ; fmul r0, rf26, rf26",
+    "nop ; fmul r1, rf27, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf28, rf28",
+    "fadd r0, r0, r2 ; nop",
+    "or rsqrt, r0, r0 ; nop",
+    "nop ; nop ; ldunif",                  // latency slot; r5 = shininess
+    "nop ; fmul rf26, rf26, r4",
+    "nop ; fmul rf27, rf27, r4",
+    "nop ; fmul rf28, rf28, r4",
+
+    /* N . Lhat, clamped at zero. The normal is used UNNORMALISED, which is GL:
+     * with normalisation disabled -- and this GL has no GL_NORMALIZE token at
+     * all -- the transformed normal is fed to the lighting equation as it is. */
+    "nop ; fmul r0, rf7, rf23",
+    "nop ; fmul r1, rf8, rf24",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf25",
+    "fadd r0, r0, r2 ; nop",
+    "fmax rf29, r0, rf22 ; nop",
+
+    /* N . Hhat, clamped at zero. fmax and not a predicated write: the only
+     * conditional register writes in this whole tree are a fragment-stage
+     * setmsf, and there are zero examples of predication to copy. */
+    "nop ; fmul r0, rf7, rf26",
+    "nop ; fmul r1, rf8, rf27",
+    "fadd r0, r0, r1 ; fmul r2, rf9, rf28",
+    "fadd r0, r0, r2 ; nop",
+    /* Clamped to 2^-8 and NOT to zero, which the log below requires: log2(0) is
+     * -inf, and shininess 0 would then give 0 * -inf = NaN where GL wants 1. At
+     * 2^-8 the smallest representable result is 2^-8 raised to the shininess,
+     * which is zero in eight bits for any exponent above 3, so nothing visible
+     * changes and the NaN cannot arise. */
+    "fmax rf30, r0, 0x3b800000 ; nop",
+
+    /* (N.Hhat) ^ shininess = exp2(shininess * log2(N.Hhat)), for ANY shininess in
+     * GL's [0,128] rather than the fixed exponent repeated squaring would give.
+     * Both SFU forms are the magic-waddr spelling; `exp` ships in 50 fog shaders,
+     * `log` is the first use of that waddr in this tree.
+     *
+     * The result STAYS IN r4 and is used from there by the specular multiplies
+     * below -- no SFU lookup follows, so nothing disturbs it, and skipping the
+     * move back to a register is what pays for the log and exp. */
+    "or log, rf30, rf30 ; nop",
+    "nop ; nop",
+    "nop ; fmul r0, r4, r5",
+    "or exp, r0, r0 ; nop",
+    "nop ; nop",
+
+    /* colour = base + diffuse_product * (N.L) + specular_product * (N.H)^10.
+     * The products are folded on the CPU (light.c), so no light x material
+     * multiply happens per vertex. */
+    "nop ; nop ; ldunif",
+    "nop ; fmul rf31, r5, rf29 ; ldunif",
+    "nop ; fmul rf3, r5, rf29 ; ldunif",
+    "nop ; fmul rf4, r5, rf29 ; ldunif",
+    "nop ; fmul r0, r5, r4 ; ldunif",
+    "fadd rf31, rf31, r0 ; fmul r1, r5, r4 ; ldunif",
+    "fadd rf3, rf3, r1 ; fmul r2, r5, r4 ; ldunif",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf31, rf31, r5 ; nop ; ldunif",
+    "fadd rf3, rf3, r5 ; nop ; ldunif",
+    "fadd rf4, rf4, r5 ; nop ; ldunif",
+    "or rf17, r5, r5 ; nop",
+    /* ---- GL_COLOR_MATERIAL: the K1 half of the folded terms ---- */
+    "ldvpmv_in rf5, 9 ; nop",
+    "ldvpmv_in rf6, 10 ; nop",
+    "ldvpmv_in rf7, 11 ; nop",
+    "ldvpmv_in rf8, 12 ; nop",
+    /* k per channel: base + diffuse*N.L + specular*spec. The tail is
+     * grouped by channel, so each group is three consecutive words. */
+    "nop ; nop ; ldunif",
+    "or rf0, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf0, rf0, r0 ; nop",
+    "or rf1, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf1, rf1, r0 ; nop",
+    "or rf2, r5, r5 ; nop ; ldunif",
+    "nop ; fmul r0, r5, rf29 ; ldunif",
+    "nop ; fmul r1, r5, r4 ; ldunif",
+    "fadd r0, r0, r1 ; nop",
+    "fadd rf2, rf2, r0 ; nop",
+    /* accumulate C * k, and the alpha scale still sitting in r5 */
+    "nop ; fmul r0, rf0, rf5",
+    "nop ; fmul r1, rf1, rf6",
+    "nop ; fmul r2, rf2, rf7",
+    "fadd rf31, rf31, r0 ; nop",
+    "fadd rf3, rf3, r1 ; fmul r0, r5, rf8",
+    "fadd rf4, rf4, r2 ; nop",
+    "fadd rf17, rf17, r0 ; nop",
+
+    /* GL clamps the final vertex colour to [0,1]. Only the upper clamp is
+     * needed: every term above is non-negative, the two dot products having
+     * been clamped at zero already.
+     *
+     * 1.0 IS REMATERIALISED HERE, and not taken from rf3 the way the untextured
+     * twin does it. This variant reuses rf3 as its GREEN accumulator above --
+     * legal, w_m being dead by then -- so clamping against rf3 clamped every
+     * channel against green: emission 0.8/0.2/0.2 came out 0.2/0.2/0.2. rf30 is
+     * dead after the log above. */
+    "or rf30, 0x3f800000, 0x3f800000 ; nop",
+    "fmin rf14, rf31, rf30 ; nop",
+    "fmin rf15, rf3,  rf30 ; nop",
+    "fmin rf16, rf4,  rf30 ; nop",
+
+    "stvpmv 4, rf11 ; nop", // s
+    "stvpmv 5, rf12 ; nop", // t
+    "stvpmv 6, rf14 ; nop", // lit colour r
+    "stvpmv 7, rf15 ; nop", // lit colour g
+    "stvpmv 8, rf16 ; nop", // lit colour b
+    "stvpmv 9, rf17 ; nop", // a = 1.0
+
+    "vpmwt -              ; nop",
+    "nop                  ; nop ; thrsw",
+    "nop                  ; nop",
+    "nop                  ; nop",
+};
+
+
 /*
  * textured_smooth_dstcolor_zero + fog.
  *
@@ -7994,96 +8847,6 @@ static const char* g_fragment_shader_textured_smooth_blend_fog_assembly[] = {
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_dstcolor_zero_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "nop ; fmul rf7, rf7, rf27",   // true_red = red * dst_red
-    "nop ; fmul rf8, rf8, rf28",   // green = green * dst_green
-    "nop ; fmul rf9, rf9, rf29",   // true_blue = blue * dst_blue
-    "nop ; fmul rf10, rf10, rf30", // alpha = alpha * dst_alpha
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_dstcolor_one + fog.
  *
@@ -8098,100 +8861,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_zero_fog_assembly[
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_dstcolor_one_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "nop ; fmul r0, rf7, rf27",  // r0 = true_red * dst_red
-    "fadd rf7, r0, rf27 ; nop",  // true_red result
-    "nop ; fmul r0, rf8, rf28",  // green
-    "fadd rf8, r0, rf28 ; nop",
-    "nop ; fmul r0, rf9, rf29",  // true_blue
-    "fadd rf9, r0, rf29 ; nop",
-    "nop ; fmul r0, rf10, rf30", // alpha
-    "fadd rf10, r0, rf30 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_dstcolor_srccolor + fog.
  *
@@ -8206,100 +8875,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_one_fog_assembly[]
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_dstcolor_srccolor_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "nop ; fmul r0, rf7, rf27",  // r0 = true_red * dst_red
-    "fadd rf7, r0, r0 ; nop",    // true_red result = 2*r0
-    "nop ; fmul r0, rf8, rf28",
-    "fadd rf8, r0, r0 ; nop",
-    "nop ; fmul r0, rf9, rf29",
-    "fadd rf9, r0, r0 ; nop",
-    "nop ; fmul r0, rf10, rf30",
-    "fadd rf10, r0, r0 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_dstcolor_invdstalpha + fog.
  *
@@ -8314,106 +8889,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_srccolor_fog_assem
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_dstcolor_invdstalpha_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf30 ; nop", // rf24 = invDstAlpha = 1.0 - dst_alpha
-    "nop ; fmul r0, rf7, rf27",   // r0 = true_red * dst_red
-    "nop ; fmul r1, rf27, rf24",  // r1 = dst_red * invDstAlpha
-    "fadd rf7, r0, r1 ; nop",     // true_red result
-    "nop ; fmul r0, rf8, rf28",
-    "nop ; fmul r1, rf28, rf24",
-    "fadd rf8, r0, r1 ; nop",
-    "nop ; fmul r0, rf9, rf29",
-    "nop ; fmul r1, rf29, rf24",
-    "fadd rf9, r0, r1 ; nop",
-    "nop ; fmul r0, rf10, rf30",
-    "nop ; fmul r1, rf30, rf24",
-    "fadd rf10, r0, r1 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_zero_invsrccolor + fog.
  *
@@ -8428,101 +8903,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_invdstalpha_fog_as
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_zero_invsrccolor_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub r0, rf24, rf7 ; nop",   // r0 = 1 - true_red (src)
-    "nop ; fmul rf7, rf27, r0",   // true_red result = dst_red * (1-src)
-    "fsub r0, rf24, rf8 ; nop",   // r0 = 1 - green
-    "nop ; fmul rf8, rf28, r0",   // green result = dst_green * (1-src)
-    "fsub r0, rf24, rf9 ; nop",   // r0 = 1 - true_blue
-    "nop ; fmul rf9, rf29, r0",   // true_blue result
-    "fsub r0, rf24, rf10 ; nop",  // r0 = 1 - alpha
-    "nop ; fmul rf10, rf30, r0",  // alpha result
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_dstcolor_srcalpha + fog.
  *
@@ -8537,100 +8917,6 @@ static const char* g_fragment_shader_textured_smooth_zero_invsrccolor_fog_assemb
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_dstcolor_srcalpha_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "fadd r0, rf7, rf10 ; nop",   // r0 = true_red + alpha
-    "nop ; fmul rf7, rf27, r0",   // true_red result = dst_red * (red+alpha)
-    "fadd r0, rf8, rf10 ; nop",   // r0 = green + alpha
-    "nop ; fmul rf8, rf28, r0",   // green result
-    "fadd r0, rf9, rf10 ; nop",   // r0 = true_blue + alpha
-    "nop ; fmul rf9, rf29, r0",   // true_blue result
-    "fadd r0, rf10, rf10 ; nop",  // r0 = alpha + alpha
-    "nop ; fmul rf10, rf30, r0",  // alpha result
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_one_invsrcalpha + fog.
  *
@@ -8645,102 +8931,6 @@ static const char* g_fragment_shader_textured_smooth_dstcolor_srcalpha_fog_assem
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_one_invsrcalpha_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1 - alpha
-    "nop ; fmul r0, rf27, rf24",   // r0 = dst_red * invAlpha
-    "fadd rf7, rf7, r0 ; nop",     // true_red result = red + r0
-    "nop ; fmul r0, rf28, rf24",
-    "fadd rf8, rf8, r0 ; nop",
-    "nop ; fmul r0, rf29, rf24",
-    "fadd rf9, rf9, r0 ; nop",
-    "nop ; fmul r0, rf30, rf24",
-    "fadd rf10, rf10, r0 ; nop",   // last write to rf10 -- safe, rf24 already snapshotted it
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * textured_smooth_invsrcalpha_srcalpha + fog.
  *
@@ -8755,106 +8945,6 @@ static const char* g_fragment_shader_textured_smooth_one_invsrcalpha_fog_assembl
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // rf24 = 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1 - alpha
-    "nop ; fmul r0, rf7, rf24",    // r0 = true_red * invAlpha
-    "nop ; fmul r1, rf27, rf10",   // r1 = dst_red * alpha
-    "fadd rf7, r0, r1 ; nop",      // true_red result
-    "nop ; fmul r0, rf8, rf24",
-    "nop ; fmul r1, rf28, rf10",
-    "fadd rf8, r0, r1 ; nop",
-    "nop ; fmul r0, rf9, rf24",
-    "nop ; fmul r1, rf29, rf10",
-    "fadd rf9, r0, r1 ; nop",
-    "nop ; fmul r0, rf10, rf24",   // reads rf10 (still original alpha)
-    "nop ; fmul r1, rf30, rf10",   // reads rf10 (still original alpha)
-    "fadd rf10, r0, r1 ; nop",     // last write to rf10
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * multitexture_modulate_translucent + fog.
  *
@@ -8869,122 +8959,6 @@ static const char* g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_fog_as
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_multitexture_modulate_translucent_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
-    "nop ; nop ; ldunifrf.rf24", // rf24 = glColor alpha multiplier (uniform 0)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = final alpha = combined_tex_alpha * color_alpha
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "or rf24, 0x3f800000, 0x3f800000 ; nop", // reuse rf24 (color-alpha no longer needed) for 1.0
-    "fsub rf24, rf24, rf10 ; nop", // rf24 = invAlpha = 1.0 - final_alpha
-    "nop ; fmul r0, rf7, rf10",   // tex_blue * alpha
-    "nop ; fmul r1, rf27, rf24",  // dst_red * invAlpha
-    "fadd rf7, r0, r1 ; nop",     // result_red -> rf7
-    "nop ; fmul r0, rf8, rf10",   // tex_green * alpha
-    "nop ; fmul r1, rf28, rf24",  // dst_green * invAlpha
-    "fadd rf8, r0, r1 ; nop",     // result_green -> rf8
-    "nop ; fmul r0, rf9, rf10",   // tex_red * alpha
-    "nop ; fmul r1, rf29, rf24",  // dst_blue * invAlpha
-    "fadd rf9, r0, r1 ; nop",     // result_blue -> rf9
-    "nop ; fmul r0, rf10, rf10",  // alpha * alpha
-    "nop ; fmul r1, rf30, rf24",  // dst_alpha * invAlpha
-    "fadd rf10, r0, r1 ; nop",    // result_alpha -> rf10
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * multitexture_modulate_blend + fog.
  *
@@ -8999,124 +8973,6 @@ static const char* g_fragment_shader_multitexture_modulate_translucent_fog_assem
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_multitexture_modulate_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-    "nop ; fmul rf7, rf7, rf20",
-    "nop ; fmul rf8, rf8, rf21",
-    "nop ; fmul rf9, rf9, rf22",
-    "nop ; fmul rf10, rf10, rf23",
-    "nop ; nop ; ldunifrf.rf24", // rf24 = blend dst-factor flag (0.0=SRC_COLOR, 1.0=SRC_ALPHA)
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25", // rf25 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf26", // rf26 = packed dst (b,a)
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop", // dst_red
-    "fadd rf28, rf28, rf25.h ; nop", // dst_green
-    "fadd rf29, rf29, rf26.l ; nop", // dst_blue
-    "fadd rf30, rf30, rf26.h ; nop", // dst_alpha
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * multitexture_decal_blend + fog.
  *
@@ -9131,129 +8987,6 @@ static const char* g_fragment_shader_multitexture_modulate_blend_fog_assembly[] 
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_multitexture_decal_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-    "fsub r0, rf20, rf7 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf7, rf7, r0 ; nop",
-    "fsub r0, rf21, rf8 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf8, rf8, r0 ; nop",
-    "fsub r0, rf22, rf9 ; nop",
-    "nop ; fmul r0, r0, rf23",
-    "fadd rf9, rf9, r0 ; nop",
-    "nop ; nop ; ldunifrf.rf24",
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25",
-    "nop ; nop ; ldtlb.rf26",
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop",
-    "fadd rf28, rf28, rf25.h ; nop",
-    "fadd rf29, rf29, rf26.l ; nop",
-    "fadd rf30, rf30, rf26.h ; nop",
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * multitexture_replace_blend + fog.
  *
@@ -9268,125 +9001,6 @@ static const char* g_fragment_shader_multitexture_decal_blend_fog_assembly[] = {
  * fog loads stay in stream order, and its blend math does not touch
  * the fog block's rf11/rf12/rf13, so the two cannot collide.
  */
-static const char* g_fragment_shader_multitexture_replace_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf17, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf16, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf16, rf16 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf17, rf17 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldtmu.rf19",
-    "nop ; nop ; ldtmu.rf18",
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",
-    "fadd rf8, rf8, rf4.h ; nop",
-    "fadd rf9, rf9, rf3.l ; nop",
-    "fadd rf10, rf10, rf3.h ; nop",
-    "sub rf20, rf20, rf20 ; nop",
-    "sub rf21, rf21, rf21 ; nop",
-    "sub rf22, rf22, rf22 ; nop",
-    "sub rf23, rf23, rf23 ; nop",
-    "fadd rf20, rf20, rf19.l ; nop",
-    "fadd rf21, rf21, rf19.h ; nop",
-    "fadd rf22, rf22, rf18.l ; nop",
-    "fadd rf23, rf23, rf18.h ; nop",
-    "or rf7, rf20, rf20 ; nop",
-    "or rf8, rf21, rf21 ; nop",
-    "or rf9, rf22, rf22 ; nop",
-    "or rf10, rf23, rf23 ; nop",
-    "nop ; nop ; ldunifrf.rf24",
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf11/rf12/rf13 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf11",             // A
-    "nop ; nop ; ldunifrf.rf12",             // B
-    "nop ; fmul rf12, rf12, rf0",
-    "fadd rf11, rf11, rf12 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf12",             // C
-    "nop ; fmul rf12, rf12, rf0",
-    "nop ; nop ; ldunifrf.rf13",             // D
-    "nop ; fmul rf13, rf13, rf0",
-    "nop ; fmul rf13, rf13, rf0",
-    "fadd rf12, rf12, rf13 ; nop",             // C*c + D*c*c
-    "or exp, rf12, rf12 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf12",             // M
-    "nop ; fmul rf11, rf11, rf12",
-    "or rf13, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf13, rf13, rf12 ; nop",             // 1-M
-    "nop ; fmul rf13, rf13, r4",
-    "fadd rf11, rf11, rf13 ; nop",             // fog factor
-    "sub rf12, rf12, rf12 ; nop",
-    "fmax rf11, rf11, rf12 ; nop",
-    "or rf12, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf11, rf11, rf12 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf12",             // fog red
-    "fsub rf7, rf7, rf12 ; nop",
-    "nop ; fmul rf7, rf7, rf11",
-    "fadd rf7, rf7, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog green
-    "fsub rf8, rf8, rf12 ; nop",
-    "nop ; fmul rf8, rf8, rf11",
-    "fadd rf8, rf8, rf12 ; nop",
-    "nop ; nop ; ldunifrf.rf12",             // fog blue
-    "fsub rf9, rf9, rf12 ; nop",
-    "nop ; fmul rf9, rf9, rf11",
-    "fadd rf9, rf9, rf12 ; nop",
-    "nop ; nop ; ldtlb.rf25",
-    "nop ; nop ; ldtlb.rf26",
-    "sub rf27, rf27, rf27 ; nop",
-    "sub rf28, rf28, rf28 ; nop",
-    "sub rf29, rf29, rf29 ; nop",
-    "sub rf30, rf30, rf30 ; nop",
-    "fadd rf27, rf27, rf25.l ; nop",
-    "fadd rf28, rf28, rf25.h ; nop",
-    "fadd rf29, rf29, rf26.l ; nop",
-    "fadd rf30, rf30, rf26.h ; nop",
-    "fsub r0, rf10, rf7 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf7, r0 ; nop",
-    "nop ; fmul r0, r0, rf29",
-    "fadd rf7, rf7, r0 ; nop",
-    "fsub r0, rf10, rf8 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf8, r0 ; nop",
-    "nop ; fmul r0, r0, rf28",
-    "fadd rf8, rf8, r0 ; nop",
-    "fsub r0, rf10, rf9 ; nop",
-    "nop ; fmul r0, r0, rf24",
-    "fadd r0, rf9, r0 ; nop",
-    "nop ; fmul r0, r0, rf27",
-    "fadd rf9, rf9, r0 ; nop",
-    "nop ; fmul r0, rf30, rf10",
-    "fadd rf10, rf10, r0 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /* ==================================================================
  * SOFTWARE-BLEND FOG, REGISTER-CONSTRAINED GROUP
  *
@@ -9395,586 +9009,6 @@ static const char* g_fragment_shader_multitexture_replace_blend_fog_assembly[] =
  * Each gets a fog block on registers allocated from its own unused set
  * instead.
  * ================================================================== */
-
-/*
- * untextured_smooth_blend + fog.
- *
- * Fog before the first ldtlb, so it reaches the SOURCE colour and not the
- * blended result -- same rule as the other software-blend fog variants.
- *
- * This shader's blend math occupies the rf11/rf12/rf13 the shared fog
- * block uses. Fog runs on rf4/rf5/rf6 instead, picked from registers
- * this shader never touches. rf0/rf1/rf2 are not available for it: the
- * fragment payload map gives them to payload_w, payload_w_centroid and
- * payload_z.
- */
-static const char* g_fragment_shader_untextured_smooth_blend_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-    /* Fog on rf4/rf5/rf6 -- allocated from THIS shader's own unused
-     * registers. The usual rf11/rf12/rf13 fog block cannot be used here:
-     * this shader's blend math occupies those. */
-    /* CONSUME the four fixed-colour words draw.c writes for EVERY untextured
-     * draw. This shader takes its colour from varyings, but ldunifrf is
-     * sequential: without these the fog loads below would read col[0..3]
-     * instead of the fog values. rf3 is scratch -- nothing reads it. */
-    "nop ; nop ; ldunifrf.rf3", // consume col[0], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[1], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[2], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[3], unused
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf4/rf5/rf6 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf4",             // A
-    "nop ; nop ; ldunifrf.rf5",             // B
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf5",             // C
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; nop ; ldunifrf.rf6",             // D
-    "nop ; fmul rf6, rf6, rf0",
-    "nop ; fmul rf6, rf6, rf0",
-    "fadd rf5, rf5, rf6 ; nop",             // C*c + D*c*c
-    "or exp, rf5, rf5 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf5",             // M
-    "nop ; fmul rf4, rf4, rf5",
-    "or rf6, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf6, rf6, rf5 ; nop",             // 1-M
-    "nop ; fmul rf6, rf6, r4",
-    "fadd rf4, rf4, rf6 ; nop",             // fog factor
-    "sub rf5, rf5, rf5 ; nop",
-    "fmax rf4, rf4, rf5 ; nop",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf4, rf4, rf5 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf5",             // fog red
-    "fsub rf7, rf7, rf5 ; nop",
-    "nop ; fmul rf7, rf7, rf4",
-    "fadd rf7, rf7, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog green
-    "fsub rf8, rf8, rf5 ; nop",
-    "nop ; fmul rf8, rf8, rf4",
-    "fadd rf8, rf8, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog blue
-    "fsub rf9, rf9, rf5 ; nop",
-    "nop ; fmul rf9, rf9, rf4",
-    "fadd rf9, rf9, rf5 ; nop",
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fsub rf18, rf17, rf10 ; nop",           // rf18 = invAlpha = 1.0 - alpha
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf13, rf18",
-    "fadd rf7, rf19, rf20 ; nop", // result_r
-    "nop ; fmul rf19, rf8, rf10",
-    "nop ; fmul rf20, rf14, rf18",
-    "fadd rf8, rf19, rf20 ; nop", // result_g
-    "nop ; fmul rf19, rf9, rf10",
-    "nop ; fmul rf20, rf15, rf18",
-    "fadd rf9, rf19, rf20 ; nop", // result_b
-    "nop ; fmul rf19, rf10, rf10",
-    "nop ; fmul rf20, rf16, rf18",
-    "fadd rf10, rf19, rf20 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * untextured_smooth_blend_add + fog.
- *
- * Fog before the first ldtlb, so it reaches the SOURCE colour and not the
- * blended result -- same rule as the other software-blend fog variants.
- *
- * This shader's blend math occupies the rf11/rf12/rf13 the shared fog
- * block uses. Fog runs on rf4/rf5/rf6 instead, picked from registers
- * this shader never touches. rf0/rf1/rf2 are not available for it: the
- * fragment payload map gives them to payload_w, payload_w_centroid and
- * payload_z.
- */
-static const char* g_fragment_shader_untextured_smooth_blend_add_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-    /* Fog on rf4/rf5/rf6 -- allocated from THIS shader's own unused
-     * registers. The usual rf11/rf12/rf13 fog block cannot be used here:
-     * this shader's blend math occupies those. */
-    /* CONSUME the four fixed-colour words draw.c writes for EVERY untextured
-     * draw. This shader takes its colour from varyings, but ldunifrf is
-     * sequential: without these the fog loads below would read col[0..3]
-     * instead of the fog values. rf3 is scratch -- nothing reads it. */
-    "nop ; nop ; ldunifrf.rf3", // consume col[0], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[1], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[2], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[3], unused
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf4/rf5/rf6 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf4",             // A
-    "nop ; nop ; ldunifrf.rf5",             // B
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf5",             // C
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; nop ; ldunifrf.rf6",             // D
-    "nop ; fmul rf6, rf6, rf0",
-    "nop ; fmul rf6, rf6, rf0",
-    "fadd rf5, rf5, rf6 ; nop",             // C*c + D*c*c
-    "or exp, rf5, rf5 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf5",             // M
-    "nop ; fmul rf4, rf4, rf5",
-    "or rf6, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf6, rf6, rf5 ; nop",             // 1-M
-    "nop ; fmul rf6, rf6, r4",
-    "fadd rf4, rf4, rf6 ; nop",             // fog factor
-    "sub rf5, rf5, rf5 ; nop",
-    "fmax rf4, rf4, rf5 ; nop",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf4, rf4, rf5 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf5",             // fog red
-    "fsub rf7, rf7, rf5 ; nop",
-    "nop ; fmul rf7, rf7, rf4",
-    "fadd rf7, rf7, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog green
-    "fsub rf8, rf8, rf5 ; nop",
-    "nop ; fmul rf8, rf8, rf4",
-    "fadd rf8, rf8, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog blue
-    "fsub rf9, rf9, rf5 ; nop",
-    "nop ; fmul rf9, rf9, rf4",
-    "fadd rf9, rf9, rf5 ; nop",
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * untextured_smooth_blend_srcalpha_one + fog.
- *
- * Fog before the first ldtlb, so it reaches the SOURCE colour and not the
- * blended result -- same rule as the other software-blend fog variants.
- *
- * This shader's blend math occupies the rf11/rf12/rf13 the shared fog
- * block uses. Fog runs on rf4/rf5/rf6 instead, picked from registers
- * this shader never touches. rf0/rf1/rf2 are not available for it: the
- * fragment payload map gives them to payload_w, payload_w_centroid and
- * payload_z.
- */
-static const char* g_fragment_shader_untextured_smooth_blend_srcalpha_one_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0",  // load r/w
-    "nop ; fmul r1, r0, rf0", // r1 = (r/w) * w
-    "fadd rf7, r1, r5 ; nop", // rf7 = true red
-    "nop ; nop ; ldvary.r0",  // load g/w
-    "nop ; fmul r1, r0, rf0", // r1 = (g/w) * w
-    "fadd rf8, r1, r5 ; nop", // rf8 = true green
-    "nop ; nop ; ldvary.r0",  // load b/w
-    "nop ; fmul r1, r0, rf0", // r1 = (b/w) * w
-    "fadd rf9, r1, r5 ; nop", // rf9 = true blue
-    "nop ; nop ; ldvary.r0",  // load a/w
-    "nop ; fmul r1, r0, rf0", // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
-    /* Fog on rf4/rf5/rf6 -- allocated from THIS shader's own unused
-     * registers. The usual rf11/rf12/rf13 fog block cannot be used here:
-     * this shader's blend math occupies those. */
-    /* CONSUME the four fixed-colour words draw.c writes for EVERY untextured
-     * draw. This shader takes its colour from varyings, but ldunifrf is
-     * sequential: without these the fog loads below would read col[0..3]
-     * instead of the fog values. rf3 is scratch -- nothing reads it. */
-    "nop ; nop ; ldunifrf.rf3", // consume col[0], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[1], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[2], unused
-    "nop ; nop ; ldunifrf.rf3", // consume col[3], unused
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf4/rf5/rf6 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf4",             // A
-    "nop ; nop ; ldunifrf.rf5",             // B
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf5",             // C
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; nop ; ldunifrf.rf6",             // D
-    "nop ; fmul rf6, rf6, rf0",
-    "nop ; fmul rf6, rf6, rf0",
-    "fadd rf5, rf5, rf6 ; nop",             // C*c + D*c*c
-    "or exp, rf5, rf5 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf5",             // M
-    "nop ; fmul rf4, rf4, rf5",
-    "or rf6, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf6, rf6, rf5 ; nop",             // 1-M
-    "nop ; fmul rf6, rf6, r4",
-    "fadd rf4, rf4, rf6 ; nop",             // fog factor
-    "sub rf5, rf5, rf5 ; nop",
-    "fmax rf4, rf4, rf5 ; nop",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf4, rf4, rf5 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf5",             // fog red
-    "fsub rf7, rf7, rf5 ; nop",
-    "nop ; fmul rf7, rf7, rf4",
-    "fadd rf7, rf7, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog green
-    "fsub rf8, rf8, rf5 ; nop",
-    "nop ; fmul rf8, rf8, rf4",
-    "fadd rf8, rf8, rf5 ; nop",
-    "nop ; nop ; ldunifrf.rf5",             // fog blue
-    "fsub rf9, rf9, rf5 ; nop",
-    "nop ; fmul rf9, rf9, rf4",
-    "fadd rf9, rf9, rf5 ; nop",
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf8, rf10",
-    "nop ; fmul rf21, rf9, rf10",
-    "nop ; fmul rf22, rf10, rf10",
-    "fadd rf7, rf19, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-    "fadd rf8, rf20, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-    "fadd rf9, rf21, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-    "fadd rf10, rf22, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * textured_smooth_blend_add + fog.
- *
- * Fog before the first ldtlb, so it reaches the SOURCE colour and not the
- * blended result -- same rule as the other software-blend fog variants.
- *
- * This shader's blend math occupies the rf11/rf12/rf13 the shared fog
- * block uses. Fog runs on rf18/rf19/rf24 instead, picked from registers
- * this shader never touches.
- */
-static const char* g_fragment_shader_textured_smooth_blend_add_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4", // texel channel pair 0,1 (.l,.h)
-    "nop ; nop ; ldtmu.rf3", // texel channel pair 2,3 (.l,.h)
-    "nop ; nop ; ldvary.r0",    // load r/w
-    "nop ; fmul r1, r0, rf0",   // r1 = r/w * w
-    "fadd rf20, r1, r5 ; nop", // rf20 = true vertex red
-    "nop ; nop ; ldvary.r0",    // load g/w
-    "nop ; fmul r1, r0, rf0",   // r1 = g/w * w
-    "fadd rf21, r1, r5 ; nop", // rf21 = true vertex green
-    "nop ; nop ; ldvary.r0",    // load b/w
-    "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop", // rf22 = true vertex blue
-    "nop ; nop ; ldvary.r0",    // load a/w
-    "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop", // rf23 = true vertex alpha
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
-    "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
-    /* Fog on rf18/rf19/rf24 -- allocated from THIS shader's own unused
-     * registers. The usual rf11/rf12/rf13 fog block cannot be used here:
-     * this shader's blend math occupies those. */
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf18/rf19/rf24 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf18",             // A
-    "nop ; nop ; ldunifrf.rf19",             // B
-    "nop ; fmul rf19, rf19, rf0",
-    "fadd rf18, rf18, rf19 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf19",             // C
-    "nop ; fmul rf19, rf19, rf0",
-    "nop ; nop ; ldunifrf.rf24",             // D
-    "nop ; fmul rf24, rf24, rf0",
-    "nop ; fmul rf24, rf24, rf0",
-    "fadd rf19, rf19, rf24 ; nop",             // C*c + D*c*c
-    "or exp, rf19, rf19 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf19",             // M
-    "nop ; fmul rf18, rf18, rf19",
-    "or rf24, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf24, rf24, rf19 ; nop",             // 1-M
-    "nop ; fmul rf24, rf24, r4",
-    "fadd rf18, rf18, rf24 ; nop",             // fog factor
-    "sub rf19, rf19, rf19 ; nop",
-    "fmax rf18, rf18, rf19 ; nop",
-    "or rf19, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf18, rf18, rf19 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf19",             // fog red
-    "fsub rf7, rf7, rf19 ; nop",
-    "nop ; fmul rf7, rf7, rf18",
-    "fadd rf7, rf7, rf19 ; nop",
-    "nop ; nop ; ldunifrf.rf19",             // fog green
-    "fsub rf8, rf8, rf19 ; nop",
-    "nop ; fmul rf8, rf8, rf18",
-    "fadd rf8, rf8, rf19 ; nop",
-    "nop ; nop ; ldunifrf.rf19",             // fog blue
-    "fsub rf9, rf9, rf19 ; nop",
-    "nop ; fmul rf9, rf9, rf18",
-    "fadd rf9, rf9, rf19 ; nop",
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst (1st read, low)
-    "fadd rf14, rf14, rf11.h ; nop", // dst (1st read, high)
-    "fadd rf15, rf15, rf12.l ; nop", // dst (2nd read, low)
-    "fadd rf16, rf16, rf12.h ; nop", // dst (2nd read, high)
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop",
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop",
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop",
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * textured_smooth_blend_srcalpha_one + fog.
- *
- * Fog before the first ldtlb, so it reaches the SOURCE colour and not the
- * blended result -- same rule as the other software-blend fog variants.
- *
- * This shader's blend math occupies the rf11/rf12/rf13 the shared fog
- * block uses. Fog runs on rf18/rf19/rf28 instead, picked from registers
- * this shader never touches.
- */
-static const char* g_fragment_shader_textured_smooth_blend_srcalpha_one_fog_assembly[] = {
-    "nop ; nop ; ldvary.r0 ; wrtmuc",
-    "nop ; fmul r1, r0, rf0 ; wrtmuc",
-    "fadd rf6, r1, r5 ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf5, r1, r5 ; nop",
-    "nop ; nop",
-    "or tmut, rf5, rf5 ; nop ; thrsw",
-    "nop ; nop ; thrsw",
-    "or tmus, rf6, rf6 ; nop",
-    "nop ; nop ; ldtmu.rf4",
-    "nop ; nop ; ldtmu.rf3",
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf20, r1, r5 ; nop",
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf21, r1, r5 ; nop",
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf22, r1, r5 ; nop",
-    "nop ; nop ; ldvary.r0",
-    "nop ; fmul r1, r0, rf0",
-    "fadd rf23, r1, r5 ; nop",
-    "nop ; fmul rf7, rf4.l, rf20",
-    "nop ; fmul rf8, rf4.h, rf21",
-    "nop ; fmul rf9, rf3.l, rf22",
-    "nop ; fmul rf10, rf3.h, rf23",
-    /* Fog on rf18/rf19/rf28 -- allocated from THIS shader's own unused
-     * registers. The usual rf11/rf12/rf13 fog block cannot be used here:
-     * this shader's blend math occupies those. */
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf18/rf19/rf28 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf18",             // A
-    "nop ; nop ; ldunifrf.rf19",             // B
-    "nop ; fmul rf19, rf19, rf0",
-    "fadd rf18, rf18, rf19 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf19",             // C
-    "nop ; fmul rf19, rf19, rf0",
-    "nop ; nop ; ldunifrf.rf28",             // D
-    "nop ; fmul rf28, rf28, rf0",
-    "nop ; fmul rf28, rf28, rf0",
-    "fadd rf19, rf19, rf28 ; nop",             // C*c + D*c*c
-    "or exp, rf19, rf19 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf19",             // M
-    "nop ; fmul rf18, rf18, rf19",
-    "or rf28, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf28, rf28, rf19 ; nop",             // 1-M
-    "nop ; fmul rf28, rf28, r4",
-    "fadd rf18, rf18, rf28 ; nop",             // fog factor
-    "sub rf19, rf19, rf19 ; nop",
-    "fmax rf18, rf18, rf19 ; nop",
-    "or rf19, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf18, rf18, rf19 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf19",             // fog red
-    "fsub rf7, rf7, rf19 ; nop",
-    "nop ; fmul rf7, rf7, rf18",
-    "fadd rf7, rf7, rf19 ; nop",
-    "nop ; nop ; ldunifrf.rf19",             // fog green
-    "fsub rf8, rf8, rf19 ; nop",
-    "nop ; fmul rf8, rf8, rf18",
-    "fadd rf8, rf8, rf19 ; nop",
-    "nop ; nop ; ldunifrf.rf19",             // fog blue
-    "fsub rf9, rf9, rf19 ; nop",
-    "nop ; fmul rf9, rf9, rf18",
-    "fadd rf9, rf9, rf19 ; nop",
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop",
-    "fadd rf14, rf14, rf11.h ; nop",
-    "fadd rf15, rf15, rf12.l ; nop",
-    "fadd rf16, rf16, rf12.h ; nop",
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "nop ; fmul rf24, rf7, rf10",
-    "nop ; fmul rf25, rf8, rf10",
-    "nop ; fmul rf26, rf9, rf10",
-    "nop ; fmul rf27, rf10, rf10",
-    "fadd rf7, rf24, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop",
-    "fadd rf8, rf25, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop",
-    "fadd rf9, rf26, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop",
-    "fadd rf10, rf27, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop",
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw",
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 
 /* ==================================================================
  * UNTEXTURED FLAT BLEND FOG
@@ -9990,208 +9024,6 @@ static const char* g_fragment_shader_textured_smooth_blend_srcalpha_one_fog_asse
  * Uniform words: the 4 source-colour words, then the fog words, matching
  * what draw.c writes for a fogged untextured draw.
  */
-static const char* g_fragment_shader_untextured_blend_fog_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-    /* Fog on rf3/rf4/rf5, allocated from this shader's own unused
-     * registers -- its blend math occupies rf11 upwards.
-     *
-     * Placed here, straight after the four source-colour loads and BEFORE the
-     * ldtlb, so fog reaches the source and not the blended result. No
-     * skip-reads are needed: unlike the smooth untextured variants, this
-     * shader already consumes draw.c's four fixed-colour words above as its
-     * own source colour, so the fog words follow immediately in the stream. */
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf3/rf4/rf5 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf3",             // A
-    "nop ; nop ; ldunifrf.rf4",             // B
-    "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
-    "or exp, rf4, rf4 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf4",             // M
-    "nop ; fmul rf3, rf3, rf4",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf5, rf5, rf4 ; nop",             // 1-M
-    "nop ; fmul rf5, rf5, r4",
-    "fadd rf3, rf3, rf5 ; nop",             // fog factor
-    "sub rf4, rf4, rf4 ; nop",
-    "fmax rf3, rf3, rf4 ; nop",
-    "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
-    "fsub rf7, rf7, rf4 ; nop",
-    "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
-    "fsub rf8, rf8, rf4 ; nop",
-    "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
-    "fsub rf9, rf9, rf4 ; nop",
-    "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
-    "nop ; nop ; thrsw", // single thread switch before the first tlb access
-    "nop ; nop",         // delay slot 1 of 2 (tick+1)
-    "nop ; nop",         // delay slot 2 of 2 (tick+2) -- ldtlb below lands at tick+3
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "sub rf7, rf7, rf7 ; nop", "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop", "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf13 ; nop",
-    "fadd rf8, rf8, rf14 ; nop",
-    "fadd rf9, rf9, rf15 ; nop",
-    "fadd rf10, rf10, rf16 ; nop",
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fsub rf18, rf17, rf10 ; nop",           // rf18 = invAlpha = 1.0 - alpha
-    "nop ; fmul rf19, rf7, rf10",
-    "nop ; fmul rf20, rf13, rf18",
-    "fadd rf7, rf19, rf20 ; nop", // result_r
-    "nop ; fmul rf19, rf8, rf10",
-    "nop ; fmul rf20, rf14, rf18",
-    "fadd rf8, rf19, rf20 ; nop", // result_g
-    "nop ; fmul rf19, rf9, rf10",
-    "nop ; fmul rf20, rf15, rf18",
-    "fadd rf9, rf19, rf20 ; nop", // result_b
-    "nop ; fmul rf19, rf10, rf10",
-    "nop ; fmul rf20, rf16, rf18",
-    "fadd rf10, rf19, rf20 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-/*
- * untextured_blend_add + fog.
- *
- * Untextured and FLAT: the source colour arrives as four ldunifrf loads at
- * the very top, so it is final before the ldtlb and the fog block goes
- * straight after it.
- *
- * Uniform words: the 4 source-colour words, then the fog words, matching
- * what draw.c writes for a fogged untextured draw.
- */
-static const char* g_fragment_shader_untextured_blend_add_fog_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-    /* Fog on rf3/rf4/rf5, allocated from this shader's own unused
-     * registers -- its blend math occupies rf11 upwards.
-     *
-     * Placed here, straight after the four source-colour loads and BEFORE the
-     * ldtlb, so fog reaches the source and not the blended result. No
-     * skip-reads are needed: unlike the smooth untextured variants, this
-     * shader already consumes draw.c's four fixed-colour words above as its
-     * own source colour, so the fog words follow immediately in the stream. */
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf3/rf4/rf5 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf3",             // A
-    "nop ; nop ; ldunifrf.rf4",             // B
-    "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
-    "or exp, rf4, rf4 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf4",             // M
-    "nop ; fmul rf3, rf3, rf4",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf5, rf5, rf4 ; nop",             // 1-M
-    "nop ; fmul rf5, rf5, r4",
-    "fadd rf3, rf3, rf5 ; nop",             // fog factor
-    "sub rf4, rf4, rf4 ; nop",
-    "fmax rf3, rf3, rf4 ; nop",
-    "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
-    "fsub rf7, rf7, rf4 ; nop",
-    "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
-    "fsub rf8, rf8, rf4 ; nop",
-    "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
-    "fsub rf9, rf9, rf4 ; nop",
-    "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "sub rf13, rf13, rf13 ; nop",
-    "sub rf14, rf14, rf14 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a) -- issued only after rf11's own unpack, matching MESA's spacing
-    "sub rf15, rf15, rf15 ; nop",
-    "sub rf16, rf16, rf16 ; nop",
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "fadd rf7, rf7, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-    "fadd rf8, rf8, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-    "fadd rf9, rf9, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-    "fadd rf10, rf10, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
 /*
  * untextured_blend_srcalpha_one + fog.
  *
@@ -10202,106 +9034,6 @@ static const char* g_fragment_shader_untextured_blend_add_fog_assembly[] = {
  * Uniform words: the 4 source-colour words, then the fog words, matching
  * what draw.c writes for a fogged untextured draw.
  */
-static const char* g_fragment_shader_untextured_blend_srcalpha_one_fog_assembly[] = {
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = src red   (uniform 0)
-    "nop ; nop ; ldunifrf.rf8",  // rf8  = src green (uniform 1)
-    "nop ; nop ; ldunifrf.rf9",  // rf9  = src blue  (uniform 2)
-    "nop ; nop ; ldunifrf.rf10", // rf10 = src alpha (uniform 3)
-    /* Fog on rf3/rf4/rf5, allocated from this shader's own unused
-     * registers -- its blend math occupies rf11 upwards.
-     *
-     * Placed here, straight after the four source-colour loads and BEFORE the
-     * ldtlb, so fog reaches the source and not the blended result. No
-     * skip-reads are needed: unlike the smooth untextured variants, this
-     * shader already consumes draw.c's four fixed-colour words above as its
-     * own source colour, so the fog words follow immediately in the stream. */
-    /* Unified fog factor: all three GL modes from uniforms.
-     *     f = M*(A + B*c) + (1-M) * 2^(C*c + D*c*c),   c = rf0 = eye distance
-     * LINEAR sets M=1 with A,B from start/end; EXP sets C=-d*log2(e); EXP2
-     * sets D=-d*d*log2(e). Same constants MESA precomputes in
-     * st_nir_lower_fog.c. One sequence serves every mode, so a mode change
-     * needs no new shader variant. 2^x is the QPU SFU, where MESA lowers
-     * nir_fexp2 on this hardware.
-     *
-     * Only rf3/rf4/rf5 are needed: each uniform is consumed as it arrives and
-     * the colour lerp runs one channel at a time. */
-    "nop ; nop ; ldunifrf.rf3",             // A
-    "nop ; nop ; ldunifrf.rf4",             // B
-    "nop ; fmul rf4, rf4, rf0",
-    "fadd rf3, rf3, rf4 ; nop",             // linear factor
-    "nop ; nop ; ldunifrf.rf4",             // C
-    "nop ; fmul rf4, rf4, rf0",
-    "nop ; nop ; ldunifrf.rf5",             // D
-    "nop ; fmul rf5, rf5, rf0",
-    "nop ; fmul rf5, rf5, rf0",
-    "fadd rf4, rf4, rf5 ; nop",             // C*c + D*c*c
-    "or exp, rf4, rf4 ; nop",               // SFU: r4 = 2^x
-    "nop ; nop",                            // SFU latency
-    "nop ; nop ; ldunifrf.rf4",             // M
-    "nop ; fmul rf3, rf3, rf4",
-    "or rf5, 0x3f800000, 0x3f800000 ; nop",
-    "fsub rf5, rf5, rf4 ; nop",             // 1-M
-    "nop ; fmul rf5, rf5, r4",
-    "fadd rf3, rf3, rf5 ; nop",             // fog factor
-    "sub rf4, rf4, rf4 ; nop",
-    "fmax rf3, rf3, rf4 ; nop",
-    "or rf4, 0x3f800000, 0x3f800000 ; nop",
-    "fmin rf3, rf3, rf4 ; nop",             // clamped to [0,1]
-    "nop ; nop ; ldunifrf.rf4",             // fog red
-    "fsub rf7, rf7, rf4 ; nop",
-    "nop ; fmul rf7, rf7, rf3",
-    "fadd rf7, rf7, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog green
-    "fsub rf8, rf8, rf4 ; nop",
-    "nop ; fmul rf8, rf8, rf3",
-    "fadd rf8, rf8, rf4 ; nop",
-    "nop ; nop ; ldunifrf.rf4",             // fog blue
-    "fsub rf9, rf9, rf4 ; nop",
-    "nop ; fmul rf9, rf9, rf3",
-    "fadd rf9, rf9, rf4 ; nop",
-
-    /* SCOREBOARD LOCK. A TLB read must not happen before the scoreboard
-     * lock is taken -- MESA nir_to_vir.c vir_emit_tlb_color_read: "We need
-     * to emit our TLB reads after we have acquired the scoreboard lock, or
-     * the GPU will hang." The lock is taken on a thread switch, so one is
-     * emitted here, and MESA's scheduler only counts the scoreboard as
-     * locked once tick - last_thrsw_tick >= 3, hence two filler slots.
-     * Which thread switch takes the lock is chosen by
-     * do_scoreboard_wait_on_first_thread_switch in the shader record
-     * (draw.c). */
-    "nop ; nop ; thrsw",
-    "nop ; nop",
-    "nop ; nop",
-
-    "nop ; nop ; ldtlb.rf11", // rf11 = packed dst (r,g)
-    "nop ; nop ; ldtlb.rf12", // rf12 = packed dst (b,a)
-    "sub rf13, rf13, rf13 ; nop", "sub rf14, rf14, rf14 ; nop",
-    "sub rf15, rf15, rf15 ; nop", "sub rf16, rf16, rf16 ; nop",
-    "fadd rf13, rf13, rf11.l ; nop", // dst_r
-    "fadd rf14, rf14, rf11.h ; nop", // dst_g
-    "fadd rf15, rf15, rf12.l ; nop", // dst_b
-    "fadd rf16, rf16, rf12.h ; nop", // dst_a
-    "or rf17, 0x3f800000, 0x3f800000 ; nop", // rf17 = 1.0
-    "nop ; fmul rf19, rf7, rf10",  // rf19 = src_r * alpha
-    "nop ; fmul rf20, rf8, rf10",  // rf20 = src_g * alpha
-    "nop ; fmul rf21, rf9, rf10",  // rf21 = src_b * alpha
-    "nop ; fmul rf22, rf10, rf10", // rf22 = alpha * alpha (before rf10 is overwritten)
-    "fadd rf7, rf19, rf13 ; nop",
-    "fmin rf7, rf7, rf17 ; nop", // result_r
-    "fadd rf8, rf20, rf14 ; nop",
-    "fmin rf8, rf8, rf17 ; nop", // result_g
-    "fadd rf9, rf21, rf15 ; nop",
-    "fmin rf9, rf9, rf17 ; nop", // result_b
-    "fadd rf10, rf22, rf16 ; nop",
-    "fmin rf10, rf10, rf17 ; nop", // result_a
-    "nop ; nop ; thrsw", // last-thrsw signal, part 1 of 2
-    "nop ; nop ; thrsw", // last-thrsw signal, part 2 of 2
-    "nop ; nop",         // filler -- satisfies the >=3-instruction gap before the next thrsw
-    "vfpack tlb, rf7, rf8  ; nop ; thrsw", // thread-end thrsw
-    "vfpack tlb, rf9, rf10 ; nop",
-    "nop                   ; nop",
-};
-
 /* ==================================================================
  * SMOOTH POINTS: GL_POINT_SMOOTH
  *
@@ -10357,9 +9089,8 @@ static const char* g_fragment_shader_untextured_point_smooth_assembly[] = {
     "fadd rf11, rf11, rf12 ; nop",
     "or rsqrt, rf11, rf11 ; nop",            // SFU: r4 = 1/sqrt(d^2)
     "nop ; nop",                             // SFU latency
-    "nop ; fmul rf11, rf11, r4",             // rf11 = d
+    "nop ; fmul rf11, rf11, r4 ; ldunifrf.rf7",             // rf11 = d
 
-    "nop ; nop ; ldunifrf.rf7",  // rf7  = red   (uniform 0)
     "nop ; nop ; ldunifrf.rf8",  // rf8  = green (uniform 1)
     "nop ; nop ; ldunifrf.rf9",  // rf9  = blue  (uniform 2)
     "nop ; nop ; ldunifrf.rf10", // rf10 = alpha (uniform 3)
@@ -10419,9 +9150,8 @@ static const char* g_fragment_shader_untextured_smooth_point_smooth_assembly[] =
     "fadd rf9, r1, r5 ; nop",  // rf9 = true blue
     "nop ; nop ; ldvary.r0",   // load a/w
     "nop ; fmul r1, r0, rf0",  // r1 = (a/w) * w
-    "fadd rf10, r1, r5 ; nop", // rf10 = true alpha
+    "fadd rf10, r1, r5 ; nop ; ldunifrf.rf24", // rf10 = true alpha
 
-    "nop ; nop ; ldunifrf.rf24", // consume col[0], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[1], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[2], unused
     "nop ; nop ; ldunifrf.rf24", // consume col[3], unused
@@ -10483,25 +9213,13 @@ static const char* g_fragment_shader_textured_point_smooth_assembly[] = {
     "nop ; nop ; ldtmu.rf4",
     "nop ; nop ; ldtmu.rf3",
 
-    "sub rf7, rf7, rf7 ; nop",
-    "sub rf8, rf8, rf8 ; nop",
-    "sub rf9, rf9, rf9 ; nop",
-    "sub rf10, rf10, rf10 ; nop",
-    "fadd rf7, rf7, rf4.l ; nop",  // tex_blue
-    "fadd rf8, rf8, rf4.h ; nop",  // tex_green
-    "fadd rf9, rf9, rf3.l ; nop",  // tex_red
-    "fadd rf10, rf10, rf3.h ; nop", // tex_alpha
 
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color blue multiplier (uniform 2)
-    "nop ; fmul rf7, rf7, rf5", // rf7 = tex_blue * color_blue
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color green multiplier (uniform 3)
-    "nop ; fmul rf8, rf8, rf5", // rf8 = tex_green * color_green
-    "nop ; nop ; ldunifrf.rf5", // rf5 = color red multiplier (uniform 4)
-    "nop ; fmul rf9, rf9, rf5", // rf9 = tex_red * color_red
-    "nop ; nop ; ldunifrf.rf24", // rf24 = color alpha multiplier (uniform 5)
-    "nop ; fmul rf10, rf10, rf24", // rf10 = tex_alpha * color_alpha
+    "nop ; nop ; ldunifrf.rf5", // rf5 = colour RED multiplier (uniform 2)
+    "nop ; fmul rf7, rf4.l, rf5 ; ldunifrf.rf5", // rf7 = texel.r * colour.r
+    "nop ; fmul rf8, rf4.h, rf5 ; ldunifrf.rf5", // rf8 = texel.g * colour.g
+    "nop ; fmul rf9, rf3.l, rf5 ; ldunifrf.rf24", // rf9 = texel.b * colour.b
+    "nop ; fmul rf10, rf3.h, rf24 ; ldunifrf.rf12", // rf10 = tex_alpha * color_alpha
 
-    "nop ; nop ; ldunifrf.rf12",             // rf12 = rasterized point size (uniform 6)
     "or rf13, 0x3f000000, 0x3f000000 ; nop", // 0.5
     "fsub rf13, rf13, rf11 ; nop",           // 0.5 - d
     "nop ; fmul rf13, rf13, rf12",           // pixels from this fragment to the rim
@@ -10562,17 +9280,14 @@ static const char* g_fragment_shader_textured_smooth_point_smooth_assembly[] = {
     "fadd rf21, r1, r5 ; nop",  // rf21 = true vertex green
     "nop ; nop ; ldvary.r0",    // load b/w
     "nop ; fmul r1, r0, rf0",   // r1 = b/w * w
-    "fadd rf22, r1, r5 ; nop",  // rf22 = true vertex blue
+    "fadd rf22, r1, r5 ; fmul rf8, rf4.h, rf21",  // rf22 = true vertex blue
     "nop ; nop ; ldvary.r0",    // load a/w
     "nop ; fmul r1, r0, rf0",   // r1 = a/w * w
-    "fadd rf23, r1, r5 ; nop",  // rf23 = true vertex alpha
+    "fadd rf23, r1, r5 ; fmul rf7, rf4.l, rf20",  // rf23 = true vertex alpha
 
-    "nop ; fmul rf7, rf4.l, rf20",  // ch0 = texel ch0 * vertex red   (TLB slot 0)
-    "nop ; fmul rf8, rf4.h, rf21",  // ch1 = texel ch1 * vertex green (TLB slot 1)
     "nop ; fmul rf9, rf3.l, rf22",  // ch2 = texel ch2 * vertex blue  (TLB slot 2)
-    "nop ; fmul rf10, rf3.h, rf23", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
+    "nop ; fmul rf10, rf3.h, rf23 ; ldunifrf.rf12", // ch3 = texel ch3 * vertex alpha (TLB slot 3)
 
-    "nop ; nop ; ldunifrf.rf12",             // rf12 = rasterized point size (uniform 2)
     "or rf13, 0x3f000000, 0x3f000000 ; nop", // 0.5
     "fsub rf13, rf13, rf11 ; nop",           // 0.5 - d
     "nop ; fmul rf13, rf13, rf12",           // pixels from this fragment to the rim
@@ -10591,7 +9306,7 @@ static const char* g_fragment_shader_textured_smooth_point_smooth_assembly[] = {
 };
 
 /*
- * MiniGLV3D orchestrator, replacing PoC's v3d_assemble() (v3d_assembler.c:1077):
+ * MiniGLV3D orchestrator, replacing the earlier library's v3d_assemble():
  * same per-instruction assemble/pack loop then whole-sequence validate,
  * adapted to write into a caller-provided V3DAssembledShader* instead of
  * static file-scope buffers.
@@ -10604,8 +9319,8 @@ static const char* g_fragment_shader_textured_smooth_point_smooth_assembly[] = {
  * plus another ~126 bytes for the
  * per-iteration struct v3d_qpu_assemble_arguments below (static for the
  * same reason). That much stack overflows and corrupts memory, which is
- * why PoC's own v3d_assemble() (v3d_assembler.c, pre-port) used static
- * file-scope buffers too.
+ * why the earlier library's own v3d_assemble() used static file-scope buffers
+ * too.
  *
  * Making them static is safe here because this is purely internal scratch
  * space for one function call, never observed outside it, with no
@@ -10617,14 +9332,66 @@ static const char* g_fragment_shader_textured_smooth_point_smooth_assembly[] = {
 static struct v3d_qpu_instr unpackedInstructions[V3D_SHADER_MAX_INSTRUCTIONS];
 static struct v3d_qpu_assemble_arguments assembleArguments;
 
-static int v3d_assemble_one_shader(struct v3d_device_info* devinfo, const char* name,
-                                    const char** assemblyLines, int numAssemblyLines,
-                                    V3DAssembledShader* out)
+/*
+ * WHAT FAILED, and the entry point that assembles one shader for a caller --
+ * BOTH EXIST ONLY FOR shader_assembler_test, so the driver does not carry them.
+ *
+ * The test links the no-logging archive, where D() is gone, so a failure there
+ * has nothing to name; and it assembles the textured fragment shader itself,
+ * that shader not being one the driver carries. In the library the recording
+ * alone would cost 2.4KB of text -- v3d_assemble_shader is exported, so it is
+ * emitted in full and inlines the whole assemble path.
+ *
+ * The demo build script's --assembler-report option compiles THIS FILE again with
+ * MGLV3D_ASSEMBLE_REPORT and links that object ahead of the archive, so the test
+ * gets both and the library gets neither.
+ */
+#ifdef MGLV3D_ASSEMBLE_REPORT
+
+const char* v3d_assemble_error_shader;
+const char* v3d_assemble_error_what;
+const char* v3d_assemble_error_text;
+int         v3d_assemble_error_index = -1;
+
+int         v3d_assemble_report_all;
+int         v3d_assemble_failures;
+const char* v3d_assemble_failed_name[V3D_ASSEMBLE_MAX_FAILURES];
+const char* v3d_assemble_failed_what[V3D_ASSEMBLE_MAX_FAILURES];
+const char* v3d_assemble_failed_text[V3D_ASSEMBLE_MAX_FAILURES];
+int         v3d_assemble_failed_index[V3D_ASSEMBLE_MAX_FAILURES];
+
+/* Returns TRUE to carry on to the next shader, FALSE to stop here. */
+static int v3d_assemble_note_failure(void)
+{
+    if (v3d_assemble_failures < V3D_ASSEMBLE_MAX_FAILURES)
+    {
+        v3d_assemble_failed_name[v3d_assemble_failures]  = v3d_assemble_error_shader;
+        v3d_assemble_failed_what[v3d_assemble_failures]  = v3d_assemble_error_what;
+        v3d_assemble_failed_text[v3d_assemble_failures]  = v3d_assemble_error_text;
+        v3d_assemble_failed_index[v3d_assemble_failures] = v3d_assemble_error_index;
+    }
+    v3d_assemble_failures++;
+    return v3d_assemble_report_all;
+}
+
+#define NOTE_FAILURE(n, what, text, idx) \
+    do { v3d_assemble_error_shader = (n);    v3d_assemble_error_what  = (what); \
+         v3d_assemble_error_text   = (text); v3d_assemble_error_index = (idx); } while (0)
+
+#else
+#define NOTE_FAILURE(n, what, text, idx) do { } while (0)
+#endif
+
+static int v3d_assemble_into(struct v3d_device_info* devinfo, const char* name,
+                             const char** assemblyLines, int numAssemblyLines,
+                             v3d_qpu_instruction* outInstructions, int capacity,
+                             int* outNumInstructions)
 {
     struct v3d_qpu_validate_result validateResults;
     int assemblyLine;
+    int numInstructions = 0;
 
-    out->numInstructions = 0;
+    *outNumInstructions = 0;
 
     for (assemblyLine = 0; assemblyLine < numAssemblyLines; ++assemblyLine)
     {
@@ -10640,38 +9407,89 @@ static int v3d_assemble_one_shader(struct v3d_device_info* devinfo, const char* 
             D(("v3d_assemble_one_shader: failed to assemble %s instruction [%ld] column %ld: %s\n'%s'\n",
                name, (LONG)assemblyLine, (LONG)assembleArguments.errorAtOffset,
                assembleArguments.errorMessage, assembleArguments.assembly));
+            NOTE_FAILURE(name, assembleArguments.errorMessage,
+                         assembleArguments.assembly, assemblyLine);
             return FALSE;
         }
 
-        if (out->numInstructions >= V3D_SHADER_MAX_INSTRUCTIONS)
+        if (numInstructions >= capacity)
         {
-            D(("v3d_assemble_one_shader: %s ran out of space (max %ld instructions)\n", name, (LONG)V3D_SHADER_MAX_INSTRUCTIONS));
+            D(("v3d_assemble_into: %s ran out of space (max %ld instructions)\n", name, (LONG)capacity));
+            NOTE_FAILURE(name, "ran out of space", assemblyLines[assemblyLine], assemblyLine);
             return FALSE;
         }
 
-        unpackedInstructions[out->numInstructions] = assembleArguments.instruction;
+        unpackedInstructions[numInstructions] = assembleArguments.instruction;
 
-        if (!v3d_qpu_instr_pack(devinfo, &assembleArguments.instruction, &out->instructions[out->numInstructions]))
+        if (!v3d_qpu_instr_pack(devinfo, &assembleArguments.instruction, &outInstructions[numInstructions]))
         {
             D(("v3d_assemble_one_shader: failed to pack %s instruction [%ld]\n'%s'\n",
                name, (LONG)assemblyLine, assembleArguments.assembly));
+            NOTE_FAILURE(name, "failed to pack -- the encoding refused it",
+                         assembleArguments.assembly, assemblyLine);
             return FALSE;
         }
 
-        ++out->numInstructions;
+        ++numInstructions;
     }
 
+    *outNumInstructions = numInstructions;
+
     memset(&validateResults, 0, sizeof(validateResults));
-    if (!v3d_qpu_validate(devinfo, unpackedInstructions, out->numInstructions, &validateResults))
+    if (!v3d_qpu_validate(devinfo, unpackedInstructions, numInstructions, &validateResults))
     {
         D(("v3d_assemble_one_shader: validation error in %s at instruction [%ld]: %s\n'%s'\n",
            name, (LONG)validateResults.errorInstructionIndex, validateResults.errorMessage,
            assemblyLines[validateResults.errorInstructionIndex]));
+        NOTE_FAILURE(name, validateResults.errorMessage,
+                     assemblyLines[validateResults.errorInstructionIndex],
+                     validateResults.errorInstructionIndex);
         return FALSE;
     }
 
     return TRUE;
 }
+
+/*
+ * The 113 ordinary shaders. The cap is V3D_SHADER_MAX_INSTRUCTIONS, 256, and
+ * it is the ASSEMBLER's buffer rather than a GPU slot size: the shaders are
+ * packed end to end in one allocation, so a longer one costs bytes, not a
+ * neighbour. Overrunning it fails loudly at init, caught by
+ * shader_assembler_test.
+ */
+static int v3d_assemble_one_shader(struct v3d_device_info* devinfo, const char* name,
+                                    const char** assemblyLines, int numAssemblyLines,
+                                    V3DAssembledShader* out)
+{
+    if (v3d_assemble_into(devinfo, name, assemblyLines, numAssemblyLines,
+                          out->instructions, V3D_SHADER_MAX_INSTRUCTIONS,
+                          &out->numInstructions))
+        return TRUE;
+
+#ifdef MGLV3D_ASSEMBLE_REPORT
+    /* Record it, and say whether to carry on: the test wants every failure. */
+    return v3d_assemble_note_failure();
+#else
+    return FALSE;
+#endif
+}
+
+/*
+ * The same thing for a shader the driver does not carry. shader_assembler_test
+ * assembles the textured fragment shader this way: its machine code is the only
+ * checked-in ground truth we have (straight from the earlier library), but no
+ * selector reaches it, so it lives with the test instead of in the driver.
+ */
+#ifdef MGLV3D_ASSEMBLE_REPORT
+int v3d_assemble_shader(V3DDevice* device, const char* name,
+                        const char** assemblyLines, int numAssemblyLines,
+                        V3DAssembledShader* out)
+{
+    return v3d_assemble_one_shader(&device->deviceInfo, name,
+                                   assemblyLines, numAssemblyLines, out);
+}
+#endif
+
 
 /* Shared storage for every assembled shader variant -- see
  * v3d_shader_assembler.h's own comment on why this is static/persistent
@@ -10681,11 +9499,6 @@ V3DAssembledShader v3d_shader_variants[V3D_MAX_SHADER_VARIANTS];
 
 int v3d_assemble_builtin_shaders(V3DDevice* device)
 {
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment",
-                                  g_fragment_shader_assembly, V3D_ARRAY_SIZE(g_fragment_shader_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED]))
-        return FALSE;
-
     if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex",
                                   g_vertex_shader_assembly, V3D_ARRAY_SIZE(g_vertex_shader_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_TEXTURED]))
@@ -10721,6 +9534,76 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH]))
         return FALSE;
 
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest",
+                                  g_fragment_shader_untextured_smooth_alphatest_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_greater",
+                                  g_fragment_shader_untextured_smooth_alphatest_greater_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_greater_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_GREATER]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_less",
+                                  g_fragment_shader_untextured_smooth_alphatest_less_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_less_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LESS]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_equal",
+                                  g_fragment_shader_untextured_smooth_alphatest_equal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_equal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_EQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_lequal",
+                                  g_fragment_shader_untextured_smooth_alphatest_lequal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_lequal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LEQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_notequal",
+                                  g_fragment_shader_untextured_smooth_alphatest_notequal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_notequal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NOTEQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_alphatest_never",
+                                  g_fragment_shader_untextured_smooth_alphatest_never_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_alphatest_never_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NEVER]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_greater",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_greater_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_greater_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_GREATER]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_less",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_less_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_less_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LESS]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_equal",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_equal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_equal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_EQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_lequal",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_lequal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_lequal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LEQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_notequal",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_notequal_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_notequal_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NOTEQUAL]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_fog_alphatest_never",
+                                  g_fragment_shader_untextured_smooth_fog_alphatest_never_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_fog_alphatest_never_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NEVER]))
+        return FALSE;
+
     if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_smooth_textured",
                                   g_vertex_shader_smooth_textured_assembly, V3D_ARRAY_SIZE(g_vertex_shader_smooth_textured_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_SMOOTH_TEXTURED]))
@@ -10729,6 +9612,16 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
     if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth",
                                   g_fragment_shader_textured_smooth_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_shader_textured_smooth_envblend",
+                                  g_fragment_shader_textured_smooth_envblend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_envblend_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVBLEND]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_shader_textured_smooth_envadd",
+                                  g_fragment_shader_textured_smooth_envadd_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_envadd_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVADD]))
         return FALSE;
 
     if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_fog",
@@ -10761,96 +9654,6 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend",
-                                  g_fragment_shader_untextured_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend_add",
-                                  g_fragment_shader_untextured_blend_add_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_add_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend_add",
-                                  g_fragment_shader_untextured_smooth_blend_add_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_add_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend_srcalpha_one",
-                                  g_fragment_shader_untextured_blend_srcalpha_one_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_srcalpha_one_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend_srcalpha_one",
-                                  g_fragment_shader_untextured_smooth_blend_srcalpha_one_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_srcalpha_one_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend_srcalpha_one",
-                                  g_fragment_shader_textured_smooth_blend_srcalpha_one_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_srcalpha_one_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend",
-                                  g_fragment_shader_untextured_smooth_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_blend",
-                                  g_fragment_shader_textured_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend",
-                                  g_fragment_shader_textured_smooth_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_zero",
-                                  g_fragment_shader_textured_smooth_dstcolor_zero_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_zero_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_one",
-                                  g_fragment_shader_textured_smooth_dstcolor_one_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_one_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_srccolor",
-                                  g_fragment_shader_textured_smooth_dstcolor_srccolor_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_srccolor_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_invdstalpha",
-                                  g_fragment_shader_textured_smooth_dstcolor_invdstalpha_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_invdstalpha_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_zero_invsrccolor",
-                                  g_fragment_shader_textured_smooth_zero_invsrccolor_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_zero_invsrccolor_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_srcalpha",
-                                  g_fragment_shader_textured_smooth_dstcolor_srcalpha_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_srcalpha_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_one_invsrcalpha",
-                                  g_fragment_shader_textured_smooth_one_invsrcalpha_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_one_invsrcalpha_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_invsrcalpha_srcalpha",
-                                  g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_padded_flat_test",
-                                  g_fragment_shader_padded_flat_test_assembly, V3D_ARRAY_SIZE(g_fragment_shader_padded_flat_test_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_PADDED_FLAT_TEST]))
-        return FALSE;
-
     if (!v3d_assemble_one_shader(&device->deviceInfo, "coordinate_clipspace",
                                   g_coordinate_shader_clipspace_assembly, V3D_ARRAY_SIZE(g_coordinate_shader_clipspace_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_COORDINATE_CLIPSPACE]))
@@ -10876,26 +9679,6 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_modulate_blend",
-                                  g_fragment_shader_multitexture_modulate_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_modulate_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_decal_blend",
-                                  g_fragment_shader_multitexture_decal_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_decal_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_replace_blend",
-                                  g_fragment_shader_multitexture_replace_blend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_replace_blend_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_modulate_translucent",
-                                  g_fragment_shader_multitexture_modulate_translucent_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_modulate_translucent_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT]))
-        return FALSE;
-
     if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_alphatest_greater",
                                   g_fragment_shader_untextured_alphatest_greater_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_alphatest_greater_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_GREATER]))
@@ -10911,9 +9694,14 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend_add",
-                                  g_fragment_shader_textured_smooth_blend_add_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_add_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_shader_textured_colormod_envblend",
+                                  g_fragment_shader_textured_colormod_envblend_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_colormod_envblend_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVBLEND]))
+        return FALSE;
+
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_shader_textured_colormod_envadd",
+                                  g_fragment_shader_textured_colormod_envadd_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_colormod_envadd_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVADD]))
         return FALSE;
 
     /* Remaining alpha_func variants: 5 comparison functions x
@@ -11105,125 +9893,59 @@ int v3d_assemble_builtin_shaders(V3DDevice* device)
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_FOG]))
         return FALSE;
 
-    /* Software-blend fog, 14 variants. */
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_blend_fog",
-                                  g_fragment_shader_textured_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND_FOG]))
+    /* The two LIT VERTEX shaders, code slots 64 and 65. They are registered
+     * among the fragment shaders, which is placement and nothing more: a code
+     * slot is type-agnostic, so draw.c's two independent code addresses decide
+     * what a slot holds. */
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_lit",
+                                  g_vertex_shader_lit_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend_fog",
-                                  g_fragment_shader_textured_smooth_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_shader_lit_colormaterial",
+                                  g_vertex_shader_lit_colormaterial_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_colormaterial_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_COLORMATERIAL]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_zero_fog",
-                                  g_fragment_shader_textured_smooth_dstcolor_zero_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_zero_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_lit_textured",
+                                  g_vertex_shader_lit_textured_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_textured_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_one_fog",
-                                  g_fragment_shader_textured_smooth_dstcolor_one_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_one_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_shader_lit_textured_colormaterial",
+                                  g_vertex_shader_lit_textured_colormaterial_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_textured_colormaterial_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED_COLORMATERIAL]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_srccolor_fog",
-                                  g_fragment_shader_textured_smooth_dstcolor_srccolor_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_srccolor_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_lit_realw",
+                                  g_vertex_shader_lit_realw_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_realw_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_REALW]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_invdstalpha_fog",
-                                  g_fragment_shader_textured_smooth_dstcolor_invdstalpha_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_invdstalpha_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_shader_lit_realw_colormaterial",
+                                  g_vertex_shader_lit_realw_colormaterial_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_realw_colormaterial_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_REALW_COLORMATERIAL]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_zero_invsrccolor_fog",
-                                  g_fragment_shader_textured_smooth_zero_invsrccolor_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_zero_invsrccolor_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_lit_multitexture",
+                                  g_vertex_shader_lit_multitexture_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_multitexture_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_dstcolor_srcalpha_fog",
-                                  g_fragment_shader_textured_smooth_dstcolor_srcalpha_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_dstcolor_srcalpha_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "vertex_shader_lit_multitexture_colormaterial",
+                                  g_vertex_shader_lit_multitexture_colormaterial_assembly, V3D_ARRAY_SIZE(g_vertex_shader_lit_multitexture_colormaterial_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE_COLORMATERIAL]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_one_invsrcalpha_fog",
-                                  g_fragment_shader_textured_smooth_one_invsrcalpha_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_one_invsrcalpha_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA_FOG]))
+    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_lit_multitexture",
+                                  g_fragment_shader_lit_multitexture_assembly, V3D_ARRAY_SIZE(g_fragment_shader_lit_multitexture_assembly),
+                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_LIT_MULTITEXTURE]))
         return FALSE;
 
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_invsrcalpha_srcalpha_fog",
-                                  g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_invsrcalpha_srcalpha_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_modulate_translucent_fog",
-                                  g_fragment_shader_multitexture_modulate_translucent_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_modulate_translucent_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_modulate_blend_fog",
-                                  g_fragment_shader_multitexture_modulate_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_modulate_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_decal_blend_fog",
-                                  g_fragment_shader_multitexture_decal_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_decal_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_multitexture_replace_blend_fog",
-                                  g_fragment_shader_multitexture_replace_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_multitexture_replace_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND_FOG]))
-        return FALSE;
+    /* Software-blend fog, the remaining 12 variants. */
 
     /* Register-constrained blend fog, 5 variants. */
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend_fog",
-                                  g_fragment_shader_untextured_smooth_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend_add_fog",
-                                  g_fragment_shader_untextured_smooth_blend_add_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_add_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_smooth_blend_srcalpha_one_fog",
-                                  g_fragment_shader_untextured_smooth_blend_srcalpha_one_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_smooth_blend_srcalpha_one_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend_add_fog",
-                                  g_fragment_shader_textured_smooth_blend_add_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_add_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_textured_smooth_blend_srcalpha_one_fog",
-                                  g_fragment_shader_textured_smooth_blend_srcalpha_one_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_textured_smooth_blend_srcalpha_one_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG]))
-        return FALSE;
-
     /* Untextured flat blend fog, 3 variants. */
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend_fog",
-                                  g_fragment_shader_untextured_blend_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend_add_fog",
-                                  g_fragment_shader_untextured_blend_add_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_add_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD_FOG]))
-        return FALSE;
-
-    if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_blend_srcalpha_one_fog",
-                                  g_fragment_shader_untextured_blend_srcalpha_one_fog_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_blend_srcalpha_one_fog_assembly),
-                                  &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE_FOG]))
-        return FALSE;
-
-
-
-
-
-
-
     if (!v3d_assemble_one_shader(&device->deviceInfo, "fragment_untextured_alphatest_never",
                                   g_fragment_shader_untextured_alphatest_never_assembly, V3D_ARRAY_SIZE(g_fragment_shader_untextured_alphatest_never_assembly),
                                   &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_NEVER]))

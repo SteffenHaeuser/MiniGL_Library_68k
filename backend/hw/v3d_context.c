@@ -11,14 +11,14 @@
 
 /*
  * zbuffer/tile_state/tile_alloc need their base address 4096-aligned.
- * Matches PoC/v3d_cle.c:674-680 exactly: over-allocate by 4096 bytes (done
- * by the caller, requesting size+4096) then align the returned
- * busaddr/hostptr up within that slack. v3d_mem_free needs only ->handle to
- * release the block (see v3d_mem_allocvec.c, and v3d_device.c for the
- * V3D_MEM_USE_MAILBOX build), so aligning busaddr/hostptr in place
+ * Matches an earlier library by the same author exactly: over-allocate by
+ * 4096 bytes (done by the caller, requesting size+4096) then align the
+ * returned busaddr/hostptr up within that slack. v3d_mem_free needs only
+ * ->handle to release the block (see v3d_mem_allocvec.c, and v3d_device.c
+ * for the V3D_MEM_USE_MAILBOX build), so aligning busaddr/hostptr in place
  * here is safe -- it doesn't break the ability to free the allocation later.
- * Binning/render/tile-list CL buffers do NOT need this: PoC's own bcl
- * pointer (v3d_cle.c:682) gets no alignment adjustment.
+ * Binning/render/tile-list CL buffers do NOT need this: the earlier library's
+ * own bcl pointer gets no alignment adjustment.
  */
 /*
  * ->size must shrink by however far hostptr moved, so that it describes the
@@ -109,11 +109,11 @@ int v3d_context_init(V3DContext* context, V3DDevice* device, v3d_u16 width, v3d_
        (LONG)context->zbuffer_bits,
        (ULONG)zbuffer_size, (ULONG)tile_state_size, (ULONG)tile_alloc_size, (LONG)tilesX, (LONG)tilesY));
 
-    /* +4096 on each: slack for align_mem_4096 below, matching PoC/v3d_cle.c:615-654's
+    /* +4096 on each: slack for align_mem_4096 below, matching the earlier library's
      * "size + 4096" allocations exactly.
      *
      * Every pool must be zeroed right after allocation, before alignment adjusts
-     * the start pointer -- matches PoC's own memset(bcl, 0, 4*4096) (v3d_cle.c:709).
+     * the start pointer -- matches the earlier library's own memset(bcl, 0, 4*4096).
      * Memory that is not cleared can carry stale content across separate
      * program runs on this hardware. The default v3d_mem_alloc (AllocVec,
      * v3d_mem_allocvec.c) does the zeroing with MEMF_CLEAR, so no pool below

@@ -17,6 +17,14 @@
  * Copyright 2025-2026.
  */
 
+/* Set by build_lib_gcc_nolog.sh, which bumps /d/v3d_driver/BUILDNUM once per
+ * build. Zero means someone compiled this file outside that script. */
+#ifndef MGLV3D_BUILD_NUMBER
+#define MGLV3D_BUILD_NUMBER 0
+#endif
+#define MGLV3D_STR2(x) #x
+#define MGLV3D_STR(x) MGLV3D_STR2(x)
+
 /*
  * MiniGLV3D fork of MiniGL/src/others.c: alpha test, colour mask, draw and
  * read buffer, polygon and shade model, blend function and equation, hints,
@@ -33,7 +41,9 @@
 
 #include "../../backend/hw/v3d_hw.h"
 
-static char rcsid[] = "$Id: others.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
+/* E() and D(): the driver's diagnostic channel, kprintf-backed. */
+#include "../../backend/hw/v3d_debug.h"
+
 
 
 extern struct IntuitionBase *IntuitionBase;
@@ -99,8 +109,72 @@ void GLColorMask(GLcontext context, GLboolean red, GLboolean green, GLboolean bl
 }
 
 
+/*
+ * glDrawBuffer. Validated exactly as GLReadBuffer beside it is; the two must
+ * not disagree about what they accept.
+ *
+ * The accepted set is the same as GLReadBuffer's and for the same reason: this
+ * context is single-buffered, everything is drawn into the FRONT, and
+ * GL_DOUBLEBUFFER answers FALSE. So GL_FRONT, GL_LEFT and GL_FRONT_LEFT all name
+ * the one buffer that exists.
+ *
+ * GL's two error classes are kept distinct, as GLReadBuffer keeps them: a buffer
+ * this context does not have is GL_INVALID_OPERATION, and a value naming no buffer
+ * at all is GL_INVALID_ENUM. GL_NONE is legal for glDrawBuffer in GL 1.1 -- it
+ * means draw nowhere -- but nothing here can honour it, so it is refused rather
+ * than accepted and ignored.
+ *
+ * Nothing reads DrawBufferMode except the GL_DRAW_BUFFER query. Drawing goes to
+ * the one buffer whatever this says; only the query distinguishes them, and it
+ * tells the truth.
+ */
 void GLDrawBuffer(GLcontext context, GLenum mode)
 {
+	if (context->CurrentPrimitive != GL_BASE)
+	{
+		GLFlagError(context, 1, GL_INVALID_OPERATION);
+		return;
+	}
+
+	switch (mode)
+	{
+		case GL_FRONT:
+		case GL_LEFT:
+		case GL_FRONT_LEFT:
+			context->DrawBufferMode = mode;
+			return;
+
+		/*
+		 * A BACK name is judged against what the application REQUESTED, not
+		 * against what it got. mglChooseNumberOfBuffers accepts a request for 2
+		 * or 3 and silently delivers 1 (context.c), so a program that asked for
+		 * double buffering is entitled to name the second buffer -- a client application asks for 2
+		 * in its context setup, then draws to GL_BACK and asserts glGetError() ==
+		 * GL_NO_ERROR, which refusing it turned into a blank screen. A program
+		 * that never asked still gets GL 1.1's GL_INVALID_OPERATION.
+		 */
+		case GL_BACK:
+		case GL_BACK_LEFT:
+		case GL_FRONT_AND_BACK:
+			if (context->RequestedBuffers < 2)
+			{
+				GLFlagError(context, 1, GL_INVALID_OPERATION);
+				return;
+			}
+			context->DrawBufferMode = mode;
+			return;
+
+		case GL_BACK_RIGHT:
+		case GL_RIGHT:
+		case GL_FRONT_RIGHT:
+			/* No stereo pair, so these name a buffer that really is absent. */
+			GLFlagError(context, 1, GL_INVALID_OPERATION);
+			return;
+
+		default:
+			GLFlagError(context, 1, GL_INVALID_ENUM);
+			return;
+	}
 }
 
 /*
@@ -136,8 +210,18 @@ void GLReadBuffer(GLcontext context, GLenum mode)
 			context->ReadBufferMode = mode;
 			return;
 
+		/* Gated on the requested buffer count exactly as GLDrawBuffer is -- see
+		 * its comment. glquakelib reads GL_BACK in its envmap capture path. */
 		case GL_BACK:
 		case GL_BACK_LEFT:
+			if (context->RequestedBuffers < 2)
+			{
+				GLFlagError(context, 1, GL_INVALID_OPERATION);
+				return;
+			}
+			context->ReadBufferMode = mode;
+			return;
+
 		case GL_BACK_RIGHT:
 		case GL_RIGHT:
 		case GL_FRONT_RIGHT:
@@ -150,10 +234,47 @@ void GLReadBuffer(GLcontext context, GLenum mode)
 	}
 }
 
+/*
+ * GL keeps a polygon mode PER FACE. Both arguments are validated and a refused
+ * call leaves both modes alone.
+ *
+ * The mode reaches the hardware as the two fill bits in CFG_BITS
+ * (direct3d_wireframe_triangles_mode, direct3d_point_fill_mode), selected in
+ * draw.c the way MESA's v3dx_emit.c selects them. There is ONE pair of bits for
+ * both faces, so a front mode differing from the back cannot be expressed --
+ * MESA has the same limit on the same silicon and warns about it.
+ *
+ * NOT CONFORMANT FOR POLYGONS, and it cannot be with these bits alone. V3D has
+ * no quad or polygon primitive -- only points, lines and triangles with their
+ * strips and fans -- so a quad or a GL_POLYGON is triangulated before it is
+ * rasterized, and the hardware's wireframe mode draws every TRIANGLE edge.
+ * GL draws a polygon's BOUNDARY edges and says the ones a triangulation
+ * invented must not appear, so the diagonal shows where GL forbids it. Only
+ * GL_TRIANGLES, where every edge is a boundary edge, is correct here.
+ *
+ * MESA solves this OUTSIDE the hardware bits, in draw_pipe_unfilled.c: it
+ * decomposes to lines and emits an edge only if the triangulation marked it a
+ * boundary (DRAW_PIPE_EDGE_FLAG_n) and the application did not clear its edge
+ * flag. The per-triangle boundary mark is the load-bearing half and belongs to
+ * the decomposition, not to the vertex, so it needs no MGLVertex field.
+ */
 void GLPolygonMode(GLcontext context, GLenum face, GLenum mode)
 {
-   context->CurPolygonMode = mode ;
-   return ;
+	if (face != GL_FRONT && face != GL_BACK && face != GL_FRONT_AND_BACK)
+	{
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+	if (mode != GL_POINT && mode != GL_LINE && mode != GL_FILL)
+	{
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	if (face == GL_FRONT || face == GL_FRONT_AND_BACK)
+		context->CurPolygonMode = mode;
+	if (face == GL_BACK || face == GL_FRONT_AND_BACK)
+		context->CurPolygonModeBack = mode;
 }
 
 void GLShadeModel(GLcontext context, GLenum mode)
@@ -266,10 +387,14 @@ void GLBlendFuncSeparate(GLcontext context, GLenum srcRGB, GLenum dstRGB,
 	context->backend.blend_alpha_srcmode = sa;
 	context->backend.blend_alpha_dstmode = da;
 
+	/* The GL-level record the queries answer from. The alpha pair takes the
+	 * ALPHA arguments: the backend fields above already do. Written after
+	 * the validation above, never before, so a rejected call leaves every one
+	 * of them as it was. */
 	context->CurBlendSrc = srcRGB;
 	context->CurBlendDst = dstRGB;
-	context->SrcAlpha    = srcRGB;
-	context->DstAlpha    = dstRGB;
+	context->SrcAlpha    = srcAlpha;
+	context->DstAlpha    = dstAlpha;
 
 	/* No hardware call here can refuse a blend mode, so there is never a
 	 * fallback to SRC_ALPHA/ONE_MINUS_SRC_ALPHA for AlphaFellBack to
@@ -338,8 +463,13 @@ void GLHint(GLcontext context, GLenum target, GLenum mode)
 	{
 		case GL_FOG_HINT:
 		case GL_PERSPECTIVE_CORRECTION_HINT:
+		case GL_POINT_SMOOTH_HINT:
+		case GL_LINE_SMOOTH_HINT:
+		case GL_POLYGON_SMOOTH_HINT:
 			/* No V3D-backend equivalent exposed -- purely advisory
-			 * hardware quality hints, safe to accept and drop. */
+			 * hardware quality hints, safe to accept and drop. GL lets
+			 * an implementation ignore any hint, so accepting beats the
+			 * GL_INVALID_ENUM a conformant client would otherwise get. */
 			break;
 		case MGL_W_ONE_HINT:
 			if (mode == GL_FASTEST) context->WOne_Hint = GL_TRUE;
@@ -363,13 +493,13 @@ void GLHint(GLcontext context, GLenum target, GLenum mode)
  * wrote; each getter converts. Every name reads the same through all the
  * getters, and a multi-element name fills every element.
  *
- * Two deliberate deviations from GL:
- *  - glGetIntegerv of a colour rounds the [0,1] float instead of scaling it
- *    into the integer range GL defines; glGetFloatv returns the colour
- *    unrounded.
- *  - GL_POLYGON_MODE answers one value where GL defines two, front and back.
- *    This driver keeps one mode, and writing a second element into a
- *    caller's one-element buffer would be worse than the missing value.
+ * One deliberate deviation from GL: glGetIntegerv of a colour rounds the
+ * [0,1] float instead of scaling it into the integer range GL defines, while
+ * glGetFloatv returns the colour unrounded.
+ *
+ * GLdouble state does not come through this table. glGetDoublev answers
+ * GL_DEPTH_RANGE and GL_DEPTH_CLEAR_VALUE from their fields directly, because
+ * narrowing them to float and widening again changes the value.
  */
 
 #define MGL_QUERY_MAX 16
@@ -404,6 +534,23 @@ static GLenum mgl_AlphaFuncToGL(v3d_u8 func)
 	}
 }
 
+/* The inverse of GLBlendEquation's own switch above, which is the only writer
+ * of either equation field and maps the five core GL equations one-to-one onto
+ * V3D modes. The hardware's four advanced modes cannot be stored, that setter
+ * rejecting their tokens, so GL_FUNC_ADD is the default arm's honest answer as
+ * well as GL's own default. */
+static GLenum mgl_BlendEquationToGL(v3d_u32 mode)
+{
+	switch (mode)
+	{
+		case V3D_BLEND_MODE_SUB:  return GL_FUNC_SUBTRACT;
+		case V3D_BLEND_MODE_RSUB: return GL_FUNC_REVERSE_SUBTRACT;
+		case V3D_BLEND_MODE_MIN:  return GL_MIN;
+		case V3D_BLEND_MODE_MAX:  return GL_MAX;
+		default:                  return GL_FUNC_ADD;
+	}
+}
+
 /* Returns how many values were written into v, 0 if this driver cannot
  * answer the name. v must hold MGL_QUERY_MAX floats. */
 static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
@@ -433,10 +580,17 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 		case GL_TEXTURE_2D:
 			v[0] = (GLfloat)context->Texture2D_State[context->ActiveTexture];
 			return 1;
+		case GL_LIGHTING:            v[0] = (GLfloat)context->Lighting_State;            return 1;
+		case GL_COLOR_MATERIAL:      v[0] = (GLfloat)context->ColorMaterial_State;       return 1;
+		case GL_COLOR_MATERIAL_FACE:      v[0] = (GLfloat)context->ColorMaterialFace;    return 1;
+		case GL_COLOR_MATERIAL_PARAMETER: v[0] = (GLfloat)context->ColorMaterialMode;    return 1;
+		/* The per-light flags come out of the mask, not eight booleans -- see
+		 * LightMask in context.h for why the mask is the primary form. */
+		case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+		case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+			v[0] = (context->LightMask & (1U << (pname - GL_LIGHT0))) ? 1.0f : 0.0f;
+			return 1;
 
-		/* The REAL depth write mask. glDepthMask writes context->DepthMask,
-		 * the field draw.c reads, while MGLSetState(GL_DEPTH_WRITEMASK)
-		 * writes CurWriteMask. */
 		case GL_DEPTH_WRITEMASK:     v[0] = (GLfloat)context->DepthMask;                 return 1;
 
 		/* ---- rectangles and ranges: every element, not just the first ---- */
@@ -461,6 +615,28 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 			v[0] = context->CurrentColor.r; v[1] = context->CurrentColor.g;
 			v[2] = context->CurrentColor.b; v[3] = context->CurrentColor.a;
 			return 4;
+
+		/*
+		 * GL_CURRENT_NORMAL. Required by GL 1.1, and it matters more than a
+		 * conformance gap usually would: the current
+		 * normal is what an application inherits from a preceding glutSolid* or
+		 * glu* call, and sphere-map texgen reads it. Without a way to read it
+		 * back, a wrong leftover normal can only be found by looking at pictures.
+		 *
+		 * It lives in NormalBuffer, not in a scalar: GLNormal3f pushes at
+		 * ++NormalBufferPointer, and GLBegin carries the last one down into slot
+		 * 0 when it rewinds. So the current normal is the most recent push when
+		 * one has happened inside this block, and slot 0 otherwise -- the same
+		 * rule draw.c's texgen applies when it picks an index.
+		 */
+		case GL_CURRENT_NORMAL:
+		{
+			GLuint nbp = context->NormalBufferPointer;
+			v[0] = context->NormalBuffer[nbp].x;
+			v[1] = context->NormalBuffer[nbp].y;
+			v[2] = context->NormalBuffer[nbp].z;
+			return 3;
+		}
 		case GL_COLOR_CLEAR_VALUE:
 			/* ClearColor is packed 0xAARRGGBB (context.c). */
 			v[0] = (GLfloat)((context->ClearColor >> 16) & 0xFF) / 255.0f;
@@ -468,6 +644,9 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 			v[2] = (GLfloat)( context->ClearColor        & 0xFF) / 255.0f;
 			v[3] = (GLfloat)((context->ClearColor >> 24) & 0xFF) / 255.0f;
 			return 4;
+		/* ClearDepth is a GLdouble, so GLGetDoublev answers it from the field
+		 * directly rather than through this table -- see its own comment. */
+		case GL_DEPTH_CLEAR_VALUE:  v[0] = (GLfloat)context->ClearDepth;  return 1;
 		case GL_COLOR_WRITEMASK:
 			v[0] = (GLfloat)context->ColorMaskR; v[1] = (GLfloat)context->ColorMaskG;
 			v[2] = (GLfloat)context->ColorMaskB; v[3] = (GLfloat)context->ColorMaskA;
@@ -498,9 +677,26 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 		case GL_FRONT_FACE:      v[0] = (GLfloat)context->CurrentFrontFace;                        return 1;
 		case GL_SHADE_MODEL:     v[0] = (GLfloat)context->CurShadeModel;                           return 1;
 		case GL_LINE_WIDTH:      v[0] = context->CurrentLineWidth;                                 return 1;
-		case GL_POLYGON_MODE:    v[0] = (GLfloat)context->CurPolygonMode;                          return 1;
+		case GL_POINT_SIZE:      v[0] = context->CurrentPointSize;                                 return 1;
+		/* Two values, front then back, as GL 1.1 6.1.1 specifies. */
+		case GL_POLYGON_MODE:    v[0] = (GLfloat)context->CurPolygonMode;
+		                         v[1] = (GLfloat)context->CurPolygonModeBack;                     return 2;
 		case GL_BLEND_SRC:       v[0] = (GLfloat)context->CurBlendSrc;                             return 1;
 		case GL_BLEND_DST:       v[0] = (GLfloat)context->CurBlendDst;                             return 1;
+		/* The separate-blend names. The RGB pair answers from the same two
+		 * fields, glBlendFunc keeping the alpha pair equal to the colour pair;
+		 * only glBlendFuncSeparate makes them differ. */
+		case GL_BLEND_SRC_RGB:   v[0] = (GLfloat)context->CurBlendSrc;                             return 1;
+		case GL_BLEND_DST_RGB:   v[0] = (GLfloat)context->CurBlendDst;                             return 1;
+		case GL_BLEND_SRC_ALPHA: v[0] = (GLfloat)context->SrcAlpha;                                return 1;
+		case GL_BLEND_DST_ALPHA: v[0] = (GLfloat)context->DstAlpha;                                return 1;
+		/* One name for one equation: the setter writes the colour and alpha
+		 * fields together, so the colour one is the whole answer. */
+		case GL_BLEND_EQUATION:
+			v[0] = (GLfloat)mgl_BlendEquationToGL(context->backend.blend_color_equation);
+			return 1;
+		case GL_POLYGON_OFFSET_FACTOR: v[0] = context->PolygonOffsetFactor;                        return 1;
+		case GL_POLYGON_OFFSET_UNITS:  v[0] = context->PolygonOffsetUnits;                         return 1;
 
 		/* ---- pixel store ---- */
 		case GL_UNPACK_ROW_LENGTH:  v[0] = (GLfloat)context->CurUnpackRowLength;  return 1;
@@ -516,12 +712,9 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 
 		/* ---- limits and how the framebuffer is actually built ---- */
 		case GL_MAX_TEXTURE_SIZE:
-			/* Base MiniGL answers 256, which is not a V3D 4.2 limit; an
-			 * application that sizes its textures from this answer
-			 * downscales anything larger to fit it. 1024 is deliberately
-			 * below V3D 4.2's 4096 (v3d_texture.h): it is the highest value
-			 * proven on this hardware, not a guess. */
-			v[0] = 1024.0f;
+			/* The same constant glTexImage2D rejects above -- see context.h
+			 * for why it is this number and why it is defined once. */
+			v[0] = (GLfloat)MGL_MAX_TEXTURE_SIZE;
 			return 1;
 		case GL_MAX_TEXTURE_UNITS_ARB: v[0] = (GLfloat)MAX_TEXUNIT; return 1;
 		case GL_RED_BITS:
@@ -539,9 +732,28 @@ static int mgl_QueryState(GLcontext context, GLenum pname, GLfloat *v)
 		case GL_CURRENT_INDEX:          v[0] = context->CurrentIndex;                 return 1;
 		case GL_EDGE_FLAG:              v[0] = (GLfloat)context->CurrentEdgeFlag;     return 1;
 		case GL_READ_BUFFER:            v[0] = (GLfloat)context->ReadBufferMode;      return 1;
+		case GL_DRAW_BUFFER:            v[0] = (GLfloat)context->DrawBufferMode;      return 1;
 		case GL_INDEX_ARRAY_TYPE:       v[0] = (GLfloat)context->IndexArrayType;      return 1;
 		case GL_INDEX_ARRAY_STRIDE:     v[0] = (GLfloat)context->IndexArrayStride;    return 1;
 		case GL_EDGE_FLAG_ARRAY_STRIDE: v[0] = (GLfloat)context->EdgeFlagArrayStride; return 1;
+		/* The six client-array ENABLES, all from ClientState, so glIsEnabled
+		 * and the four getters agree on them. GL_TEXTURE_COORD_ARRAY is the
+		 * CLIENT active unit's bit -- ClientActiveTexture, not the server-side
+		 * ActiveTexture that GL_TEXTURE_2D above reads; the two are independent
+		 * and there is one bit per unit. The array strides nearby are reported
+		 * AS GIVEN, not as the resolved step the gather walks. */
+		case GL_VERTEX_ARRAY:           v[0] = (context->ClientState & GLCS_VERTEX)   ? 1.f : 0.f; return 1;
+		case GL_NORMAL_ARRAY:           v[0] = (context->ClientState & GLCS_NORMAL)   ? 1.f : 0.f; return 1;
+		case GL_COLOR_ARRAY:            v[0] = (context->ClientState & GLCS_COLOR)    ? 1.f : 0.f; return 1;
+		case GL_INDEX_ARRAY:            v[0] = (context->ClientState & GLCS_INDEX)    ? 1.f : 0.f; return 1;
+		case GL_EDGE_FLAG_ARRAY:        v[0] = (context->ClientState & GLCS_EDGEFLAG) ? 1.f : 0.f; return 1;
+		case GL_TEXTURE_COORD_ARRAY:
+			v[0] = (context->ClientState &
+			        ((context->ClientActiveTexture == 1) ? GLCS_TEXTURE1 : GLCS_TEXTURE))
+			       ? 1.f : 0.f;
+			return 1;
+		case GL_NORMAL_ARRAY_TYPE:      v[0] = (GLfloat)context->NormalArrayType;   return 1;
+		case GL_NORMAL_ARRAY_STRIDE:    v[0] = (GLfloat)context->NormalArrayStride; return 1;
 	}
 
 	return 0;
@@ -615,30 +827,50 @@ const GLubyte * GLGetString(GLcontext context, GLenum name)
 	switch(name)
 	{
 		case GL_RENDERER:
-			return "MiniGLV3D/Broadcom V3D 4.2";
+			/* The build number is part of the renderer string on purpose:
+			 * the client applications print GL_RENDERER at init, so every
+			 * build names itself in the game console and matches the
+			 * minigl_bNNN.library it was handed out as. build_lib_gcc_nolog.sh
+			 * bumps MGLV3D_BUILD_NUMBER per build; nothing parses past the
+			 * name -- the engines strstr() for "permedia"/"riva"/"virge". */
+			return (const GLubyte*)"MiniGLV3D/Broadcom V3D 4.2 b" MGLV3D_STR(MGLV3D_BUILD_NUMBER)
+			       " [" __DATE__ " " __TIME__ "]";
 
-		case GL_VENDOR:     return "Hyperion / MiniGLV3D port";
-		case GL_VERSION:    return "1.1";
+		case GL_VENDOR:     return (const GLubyte*)"Hyperion / MiniGLV3D port";
+		case GL_VERSION:    return (const GLubyte*)"1.1";
 		case GL_EXTENSIONS:
 			/* GL_EXT_paletted_texture + GL_EXT_shared_texture_palette
 			 * advertise GL_COLOR_INDEX texture upload (TEX_SRCFMT_COLOR_INDEX8
 			 * / tex_BuildPaletteLUT in texture.c).
 			 *
-			 * The shared-palette semantics are the honest ones here: the
-			 * palette lives in the GL context (GLColorTable writes
-			 * context->PaletteData), i.e. ONE palette shared by all textures.
-			 * EXT_paletted_texture nominally implies PER-TEXTURE palettes,
-			 * which this does not do -- it is listed because Quake2 requires
-			 * both names before it will use the shared path, and the shared
-			 * path is the only one it actually exercises. Anything that
-			 * genuinely relies on per-texture palettes would be misled.
+			 * The shared-palette semantics are the honest ones: ONE palette per
+			 * context, which GLColorTable writes through any of its three
+			 * targets, GL_TEXTURE_2D included. A paletted-texture client still
+			 * gets a per-texture RESULT, because the indices are expanded
+			 * through whichever palette is current at upload. What is missing
+			 * is a palette changed after a texture is resident -- the index
+			 * image is not retained, so nothing re-expands -- and
+			 * glColorSubTableEXT / glGetColorTableEXT / GL_TEXTURE_INDEX_SIZE_EXT,
+			 * which do not exist here. Both names are listed because a client application
+			 * wants both before it will use the shared path.
 			 *
 			 * NOTE the MGL_ prefixes on two entries are deliberate and must
 			 * stay: "GL_MGL_ARB_multitexture" CONTAINS "GL_ARB_multitexture"
 			 * as a substring, so strstr-based detection still finds it. */
-			return "GL_MGL_ARB_multitexture GL_EXT_compiled_vertex_array GL_MGL_packed_pixels GL_EXT_color_table GL_EXT_paletted_texture GL_EXT_shared_texture_palette";
+			return (const GLubyte*)"GL_MGL_ARB_multitexture GL_EXT_compiled_vertex_array GL_MGL_packed_pixels GL_EXT_color_table GL_EXT_paletted_texture GL_EXT_shared_texture_palette";
 
-		default:            return "Huh?";
+		/*
+		 * GL says an unrecognised name is GL_INVALID_ENUM and the return is 0.
+		 * A placeholder string would be worse than wrong: a caller testing for
+		 * NULL gets a valid pointer and goes on to compare or print something
+		 * meaningless, with no error flagged to find it by.
+		 *
+		 * Checked before changing it: every glGetString call across the client applications passes one of the four names above, so nothing in
+		 * the games can reach this arm.
+		 */
+		default:
+			GLFlagError(context, 1, GL_INVALID_ENUM);
+			return NULL;
 	}
 }
 
@@ -668,10 +900,11 @@ void GLGetFloatv(GLcontext context, GLenum pname, GLfloat *params)
  * state behind them -- the matrices, the colours -- is itself kept in single
  * precision.
  *
- * The one exception is the depth range, which glDepthRange stores as the
- * GLdouble it was given. Narrowing it through the float table and widening it
- * again would hand back 0.100000001490116 for 0.1, so it is answered from the
- * GLdouble fields directly.
+ * The exceptions are the two names whose state really is kept as GLdouble:
+ * the depth range, which glDepthRange stores as it was given, and the depth
+ * clear value from glClearDepth. Narrowing either through the float table and
+ * widening it again would hand back 0.100000001490116 for 0.1, so both are
+ * answered from the GLdouble fields directly.
  */
 void GLGetDoublev(GLcontext context, GLenum pname, GLdouble *params)
 {
@@ -683,6 +916,12 @@ void GLGetDoublev(GLcontext context, GLenum pname, GLdouble *params)
 	{
 		params[0] = context->near;
 		params[1] = context->far;
+		return;
+	}
+
+	if (pname == GL_DEPTH_CLEAR_VALUE)
+	{
+		params[0] = context->ClearDepth;
 		return;
 	}
 
@@ -699,28 +938,47 @@ void GLGetDoublev(GLcontext context, GLenum pname, GLdouble *params)
 }
 
 /*
- * glGetPointerv. Answers the five client arrays gl.h can name. The texcoord
+ * glGetPointerv. Answers the six client arrays gl.h can name. The texcoord
  * pointer is the CLIENT active unit's, as GL specifies -- the same routing
- * glTexCoordPointer uses to store it. Until an application sets them, the
- * vertex, colour and unit-0 texcoord arrays report the placeholder addresses
- * MGLInitContext gives them rather than GL's NULL; nothing is ever read
- * through those unless the array is also enabled. There is no feedback or
- * selection buffer to report.
+ * glTexCoordPointer uses to store it. There is no feedback or selection buffer
+ * to report.
+ *
+ * MGLInitContext points three of them -- vertex, colour and unit-0 texcoord --
+ * INTO context->VertexBuffer instead of leaving NULL, so that the draw path's
+ * "enabled && pointer != NULL" guard keeps passing for an array enabled
+ * without a pointer. GL requires this query to answer NULL until the
+ * application sets one, so those placeholders are recognised below and
+ * reported as NULL. The initialisation itself is deliberately left alone:
+ * the draw path really does read through it, and NULL there would silently
+ * change which arrays a draw honours.
  */
+static GLvoid *mgl_ArrayPtr(void *stored, void *placeholder)
+{
+	return (stored == placeholder) ? NULL : stored;
+}
+
 void GLGetPointerv(GLcontext context, GLenum pname, GLvoid **params)
 {
 	switch (pname)
 	{
 		case GL_VERTEX_ARRAY_POINTER:
-			*params = (GLvoid *)context->ArrayPointer.verts;
+			*params = mgl_ArrayPtr(context->ArrayPointer.verts,
+			                       &context->VertexBuffer->v.x);
 			return;
 		case GL_COLOR_ARRAY_POINTER:
-			*params = (GLvoid *)context->ArrayPointer.colors;
+			*params = mgl_ArrayPtr(context->ArrayPointer.colors,
+			                       &context->VertexBuffer->color);
 			return;
+		case GL_NORMAL_ARRAY_POINTER:
+			*params = (GLvoid *)context->NormalArrayPointer;
+			return;
+		/* Unit 1 has no placeholder: MGLInitContext never writes it, so the
+		 * zeroed allocation already gives it GL's NULL. */
 		case GL_TEXTURE_COORD_ARRAY_POINTER:
-			*params = (GLvoid *)((context->ClientActiveTexture == 1)
-			                     ? context->ArrayPointer.texcoords1
-			                     : context->ArrayPointer.texcoords);
+			*params = (context->ClientActiveTexture == 1)
+			          ? (GLvoid *)context->ArrayPointer.texcoords1
+			          : mgl_ArrayPtr(context->ArrayPointer.texcoords,
+			                         &context->VertexBuffer->v.u0);
 			return;
 		case GL_INDEX_ARRAY_POINTER:
 			*params = (GLvoid *)context->IndexArrayPointer;
@@ -768,6 +1026,22 @@ GLboolean GLIsEnabled(GLcontext context, GLenum cap)
 		case GL_TEXTURE_GEN_T:
 		case GL_TEXTURE_2D:
 		case GL_DEPTH_WRITEMASK:
+		case GL_LIGHTING:
+		case GL_COLOR_MATERIAL:
+		case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+		case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+		/* The six client-array enables. GL defines these as glIsEnabled names
+		 * as well as glGet ones, and mgl_QueryState answers all six, so they
+		 * belong in this group rather than in arms of their own. A label here
+		 * with no arm over there would fall past the switch and return
+		 * GL_FALSE with no error at all, which is worse than the error it
+		 * replaces. */
+		case GL_VERTEX_ARRAY:
+		case GL_NORMAL_ARRAY:
+		case GL_COLOR_ARRAY:
+		case GL_INDEX_ARRAY:
+		case GL_EDGE_FLAG_ARRAY:
+		case GL_TEXTURE_COORD_ARRAY:
 			if (mgl_QueryState(context, cap, v) == 1)
 				return (GLboolean)(v[0] != 0.0f);
 			break;
@@ -775,14 +1049,55 @@ GLboolean GLIsEnabled(GLcontext context, GLenum cap)
 		/* MiniGL's own capabilities, tracked by the same switch. */
 		case MGL_Z_OFFSET:              return (GLboolean)context->ZOffset_State;
 		case MGL_ARRAY_TRANSFORMATIONS: return (GLboolean)context->VertexArrayPipeline;
+		/* Stored and reported, but perspective correction is NOT optional on
+		 * this hardware -- there is no toggle to drive, and the only
+		 * non-perspective CL packet is never emitted. GL's state machine says
+		 * answer what was set, so an application that disables it reads back
+		 * GL_FALSE while rendering stays perspective-correct. */
+		case MGL_PERSPECTIVE_MAPPING:   return (GLboolean)context->PerspectiveMapping_State;
+
+		/* LEGAL GL 1.1 CAPABILITIES THIS DRIVER DOES NOT IMPLEMENT. GL says
+		 * querying one is valid and the answer is GL_FALSE, so these must not
+		 * reach the GL_INVALID_ENUM below: a conformant save-and-restore helper
+		 * queries everything it might touch, and an error there is fatal to a
+		 * client that asserts on glGetError.
+		 *
+		 * NAMED, from <mgl/gl.h>, so a client can pass one by name too. The
+		 * values are the ones two real GL headers agree on, all 37 of them. */
+		case GL_STENCIL_TEST:
+		case GL_LINE_SMOOTH:   case GL_LINE_STIPPLE:
+		case GL_POLYGON_SMOOTH: case GL_POLYGON_STIPPLE:
+		case GL_COLOR_LOGIC_OP: case GL_INDEX_LOGIC_OP:
+		case GL_TEXTURE_1D:    case GL_AUTO_NORMAL:
+		case GL_NORMALIZE:
+		/* The vertex cannot carry r or q -- see glTexGeni. */
+		case GL_TEXTURE_GEN_R: case GL_TEXTURE_GEN_Q:
+		/* There is no CPU clipper. */
+		case GL_CLIP_PLANE0: case GL_CLIP_PLANE1: case GL_CLIP_PLANE2:
+		case GL_CLIP_PLANE3: case GL_CLIP_PLANE4: case GL_CLIP_PLANE5:
+		/* Evaluators, absent entirely. */
+		case GL_MAP1_COLOR_4: case GL_MAP1_INDEX: case GL_MAP1_NORMAL:
+		case GL_MAP1_TEXTURE_COORD_1: case GL_MAP1_TEXTURE_COORD_2:
+		case GL_MAP1_TEXTURE_COORD_3: case GL_MAP1_TEXTURE_COORD_4:
+		case GL_MAP1_VERTEX_3: case GL_MAP1_VERTEX_4:
+		case GL_MAP2_COLOR_4: case GL_MAP2_INDEX: case GL_MAP2_NORMAL:
+		case GL_MAP2_TEXTURE_COORD_1: case GL_MAP2_TEXTURE_COORD_2:
+		case GL_MAP2_TEXTURE_COORD_3: case GL_MAP2_TEXTURE_COORD_4:
+		case GL_MAP2_VERTEX_3: case GL_MAP2_VERTEX_4:
+			return GL_FALSE;
 
 		default:
+			/* Not a capability at all. GL 1.1 4.1: GL_INVALID_ENUM, and the
+			 * return is GL_FALSE. The ERROR is what matters: GL_FALSE alone is
+			 * indistinguishable to a save-and-restore helper from a capability
+			 * that is genuinely off, so it would disable whatever it could not
+			 * see. */
+			GLFlagError(context, 1, GL_INVALID_ENUM);
 			break;
 	}
 
-	/* Anything else is a capability this driver does not have. Lighting,
-	 * stencil and clip planes are not even enum values here, so they cannot
-	 * be named, and false is the honest answer for whatever remains. */
+	/* Reached by the default arm above, and by a known capability whose query
+	 * failed -- which records nothing, because the capability is real. */
 	return GL_FALSE;
 }
 
@@ -820,6 +1135,18 @@ static struct RastPort *mgl_FrontRastPort(GLcontext context, struct RastPort *fr
 	return frontrp;
 }
 
+/* Decimal digits of v into dst, returning how many were written -- see
+ * MGLWriteShotPPM's header note on why printf cannot be used here. */
+static int mgl_PutUInt(char *dst, unsigned v)
+{
+	char tmp[12];
+	int  n = 0, i = 0;
+
+	do { tmp[n++] = (char)('0' + (v % 10u)); v /= 10u; } while (v);
+	while (n) dst[i++] = tmp[--n];
+	return i;
+}
+
 void MGLWriteShotPPM(GLcontext context, char *filename)
 {
 	GLubyte *pixelline;
@@ -830,15 +1157,22 @@ void MGLWriteShotPPM(GLcontext context, char *filename)
 	struct RastPort *rport;
 	struct RastPort frontrp;
 
-	/* context->v3dWindow is always NULL on the fullscreen path
-	 * (vid_OpenDisplay opens a Screen and never sets v3dWindow -- see
-	 * viewport.c's header comment), so fall back to context->v3dScreen's
-	 * Width/Height and its front RastPort. */
-	if (context->v3dWindow)
+	/* KEYED ON v3dRastPort, the render target, not on v3dWindow. Every context
+	 * that renders into an offscreen bitmap has one -- windowed, external
+	 * window and MGLCreateContextFromBitMap -- and it covers exactly
+	 * backend.width x backend.height, the GL drawable with no window chrome:
+	 * windowed presentation ClipBlits it into the client area, inside the
+	 * borders (gl_FramePresent, context.c). v3dWindow->RPort would instead
+	 * capture the borders and title bar. Only fullscreen leaves it NULL
+	 * (MEMF_CLEAR at creation), and there the GL image is in the screen's own
+	 * buffers, which is what mgl_FrontRastPort returns. Windowed never screen-
+	 * buffers (MGLLockBack takes that path only for !v3dWindow), so after the
+	 * flush below this bitmap holds the newest completed render. */
+	if (context->v3dRastPort)
 	{
-		width = context->v3dWindow->Width;
-		height = context->v3dWindow->Height;
-		rport = context->v3dWindow->RPort;
+		width = (int)context->backend.width;
+		height = (int)context->backend.height;
+		rport = context->v3dRastPort;
 	}
 	else if (context->v3dScreen)
 	{
@@ -848,16 +1182,9 @@ void MGLWriteShotPPM(GLcontext context, char *filename)
 	}
 	else
 	{
-		/* A MGLCreateContextFromBitMap context: no window and no screen, so
-		 * mgl_FrontRastPort cannot be used either -- it returns
-		 * &v3dScreen->RastPort for NumBuffers < 2, which a bitmap context
-		 * always is.
-		 *
-		 * Here the render target IS the thing worth capturing, and we already
-		 * hold a rastport for it. */
-		width = (int)context->backend.width;
-		height = (int)context->backend.height;
-		rport = context->v3dRastPort;
+		/* Neither: not a context this driver produces, and there would be no
+		 * rastport to read. */
+		return;
 	}
 
 	/* A screenshot of what is on screen: wait for a render still running
@@ -881,8 +1208,29 @@ void MGLWriteShotPPM(GLcontext context, char *filename)
 		return;
 	}
 
-	// Write PPM header
-	fprintf(f, "P6\n%d %d\n255\n", width, height);
+	/* THE HEADER IS BUILT BY HAND, not with fprintf. This function is compiled
+	 * into minigl.library, which is linked -nostdlib and supplies its own
+	 * freestanding fopen/fwrite/fclose; it has no printf-family formatting at
+	 * all, so a %d there expands to nothing and the header would be
+	 * unparseable. fwrite is the only output call this function needs. */
+	{
+		char hdr[40];
+		int  n = 0;
+
+		hdr[n++] = 'P'; hdr[n++] = '6'; hdr[n++] = '\n';
+		n += mgl_PutUInt(hdr + n, (unsigned)width);
+		hdr[n++] = ' ';
+		n += mgl_PutUInt(hdr + n, (unsigned)height);
+		hdr[n++] = '\n';
+		hdr[n++] = '2'; hdr[n++] = '5'; hdr[n++] = '5'; hdr[n++] = '\n';
+
+		if (fwrite(hdr, (size_t)n, 1, f) != 1)
+		{
+			fclose(f);
+			free(pixelline);
+			return;
+		}
+	}
 
 	for (i=0; i<height; i++)
 	{
@@ -1173,11 +1521,19 @@ void GLReadPixels(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei he
 }
 
 /* For glCopyTex(Sub)Image2D (texture.c): the rectangle at window (x, y),
- * bottom-origin, as tightly packed GL_RGB bytes, bottom row first --
+ * bottom-origin, as tightly packed GL_RGBA bytes, bottom row first --
  * GLReadPixels' result with the caller's pack state ignored, since the copy
  * owns this buffer, and with no error of its own (the copy validated its
- * arguments). Pixels outside the window are left as they were. */
-void mgl_ReadPixelsTightRGB(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height, GLubyte *pixels)
+ * arguments). Pixels outside the window are left as they were.
+ *
+ * RGBA, not RGB: this framebuffer HAS an alpha channel -- mgl_ReadColor reads
+ * it out of the BGRA32 target's fourth byte -- so GL requires a copy into an
+ * alpha internalformat to carry it. Reading RGB forced every copied texel
+ * opaque, and no internalformat could get the alpha back. An RGB destination
+ * still ends up opaque, decided by the destination rather than here:
+ * glCopyTexImage2D's internalformat goes through tex_InternalFormatNoAlpha and
+ * glCopyTexSubImage2D's uses the texture's own recorded tex->no_alpha. */
+void mgl_ReadPixelsTightRGBA(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height, GLubyte *pixels)
 {
 	mgl_PackState tight;
 
@@ -1190,7 +1546,7 @@ void mgl_ReadPixelsTightRGB(GLcontext context, GLint x, GLint y, GLsizei width, 
 	tight.skiprows   = 0;
 	tight.swapbytes  = GL_FALSE;
 
-	mgl_ReadColor(context, x, y, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels, &tight, 3, 1);
+	mgl_ReadColor(context, x, y, width, height, GL_RGBA, GL_UNSIGNED_BYTE, pixels, &tight, 4, 1);
 }
 
 void MGLKeyFunc(GLcontext context, KeyHandlerFn k)
@@ -1224,8 +1580,9 @@ void MGLMainLoop(GLcontext context)
 	struct Window *window;
 	ULONG Class;
 	UWORD Code;
+	UWORD Qual;
 	WORD MouseX, MouseY;
-	GLbitfield buttons = 0;
+	GLbitfield buttons;
 
 	/* context->inputWindow, NOT v3dWindow -- v3dWindow is always NULL in
 	 * fullscreen mode (that field means "true windowed rendering", not
@@ -1236,10 +1593,23 @@ void MGLMainLoop(GLcontext context)
 	window = context->inputWindow;
 	if (!window)
 	{
-		printf("MGLMainLoop: no input window available, cannot run\n");
+		E(("MGLMainLoop: no input window available, cannot run\n"));
 		return;
 	}
-	ModifyIDCMP(window, IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_MOUSEMOVE|IDCMP_MOUSEBUTTONS);
+	/* The caller's own flags are KEPT, not overwritten: an adopted window
+	 * (MGLCreateContextFromWindow) belongs to the application, which may well
+	 * have asked Intuition for classes of its own. Three groups are held off
+	 * because this loop cannot honour them -- IDCMP_DELTAMOVE, since the
+	 * MOUSEMOVE arm below treats MouseX/MouseY as absolute window coordinates
+	 * and every game's own ModifyIDCMP sets that flag; the VERIFY classes,
+	 * which need a prompter reply than a loop that may run an Idle() callback
+	 * first; and IDCMP_REFRESHWINDOW, which needs the BeginRefresh/EndRefresh
+	 * pair this loop does not have. Anything else is drained and dropped, as
+	 * the switch below already does with every class it has no arm for. */
+	ModifyIDCMP(window,
+		(window->IDCMPFlags & ~(IDCMP_DELTAMOVE|IDCMP_REFRESHWINDOW|
+			IDCMP_SIZEVERIFY|IDCMP_REQVERIFY|IDCMP_MENUVERIFY)) |
+		IDCMP_VANILLAKEY|IDCMP_RAWKEY|IDCMP_MOUSEMOVE|IDCMP_MOUSEBUTTONS);
 
 	context->Running = GL_TRUE;
 
@@ -1261,6 +1631,7 @@ void MGLMainLoop(GLcontext context)
 		{
 			Class  = imsg->Class;
 			Code   = imsg->Code;
+			Qual   = imsg->Qualifier;
 			MouseX = imsg->MouseX;
 			MouseY = imsg->MouseY;
 			ReplyMsg((struct Message *)imsg);
@@ -1272,21 +1643,93 @@ void MGLMainLoop(GLcontext context)
 					context->KeyHandler((char)Code);
 				}
 				break;
-			case IDCMP_MOUSEBUTTONS:
-				switch(Code)
+			/*
+			 * IDCMP_RAWKEY, and without this arm MGLSpecialFunc's handler could
+			 * NEVER be called. ModifyIDCMP above asks Intuition for IDCMP_RAWKEY
+			 * and this arm is its only consumer, so the whole MGLspecial mechanism
+			 * rests on it.
+			 *
+			 * Raw codes, from the standard Amiga keymap: F1-F10 are 0x50-0x59 and
+			 * the cursors are up 0x4C, down 0x4D, right 0x4E, left 0x4F -- note
+			 * that RIGHT precedes LEFT, which is the one easy mistake here.
+			 *
+			 * Bit 0x80 marks a key RELEASE. Only presses are reported, because
+			 * SpecialHandlerFn takes a key and has no up/down argument, so
+			 * reporting both would deliver every keystroke twice.
+			 *
+			 * A printable key raises BOTH a VANILLAKEY and a RAWKEY event. That
+			 * causes no double handling: only these fourteen codes are translated
+			 * and every other raw code is dropped here.
+			 */
+			case IDCMP_RAWKEY:
+				if (context->SpecialHandler && !(Code & 0x80))
 				{
-					case SELECTDOWN: buttons |= MGL_BUTTON_LEFT;    break;
-					case SELECTUP:   buttons &= ~MGL_BUTTON_LEFT;   break;
-					case MENUDOWN:   buttons |= MGL_BUTTON_RIGHT;   break;
-					case MENUUP:     buttons &= ~MGL_BUTTON_RIGHT;  break;
-					case MIDDLEDOWN: buttons |= MGL_BUTTON_MID;     break;
-					case MIDDLEUP:   buttons &= MGL_BUTTON_MID;     break;
+					MGLspecial s;
+					int        have = 1;
+
+					switch (Code)
+					{
+						case 0x50: s = MGLKEY_F1;     break;
+						case 0x51: s = MGLKEY_F2;     break;
+						case 0x52: s = MGLKEY_F3;     break;
+						case 0x53: s = MGLKEY_F4;     break;
+						case 0x54: s = MGLKEY_F5;     break;
+						case 0x55: s = MGLKEY_F6;     break;
+						case 0x56: s = MGLKEY_F7;     break;
+						case 0x57: s = MGLKEY_F8;     break;
+						case 0x58: s = MGLKEY_F9;     break;
+						case 0x59: s = MGLKEY_F10;    break;
+						case 0x4C: s = MGLKEY_CUP;    break;
+						case 0x4D: s = MGLKEY_CDOWN;  break;
+						case 0x4E: s = MGLKEY_CRIGHT; break;
+						case 0x4F: s = MGLKEY_CLEFT;  break;
+						default:   s = MGLKEY_F1; have = 0; break;
+					}
+
+					if (have)
+						context->SpecialHandler(s);
 				}
-			// drop through
+				break;
+			/* Both classes share one body: a button event reports the state and
+			 * the position it happened at, exactly as a move does. */
+			case IDCMP_MOUSEBUTTONS:
 			case IDCMP_MOUSEMOVE:
+				/* THE MESSAGE'S OWN QUALIFIER, not a mask accumulated from the
+				 * button codes. It is a live snapshot of all three buttons, so a
+				 * release that was never delivered to this window cannot leave a
+				 * bit stuck. Each bit is tested on its own because the two orders
+				 * are reverses -- qualifier MIDBUTTON 0x1000, RBUTTON 0x2000,
+				 * LEFTBUTTON 0x4000 against MGL_BUTTON_LEFT 1, RIGHT 2, MID 4 --
+				 * so a shift would swap left and middle. */
+				buttons = 0;
+				if (Qual & IEQUALIFIER_LEFTBUTTON) buttons |= MGL_BUTTON_LEFT;
+				if (Qual & IEQUALIFIER_RBUTTON)    buttons |= MGL_BUTTON_RIGHT;
+				if (Qual & IEQUALIFIER_MIDBUTTON)  buttons |= MGL_BUTTON_MID;
+
 				if (context->MouseHandler)
 				{
-					context->MouseHandler((GLint)MouseX, (GLint)MouseY, buttons);
+					/* GL WINDOW COORDINATES, not Intuition's. IntuiMessage's
+					 * MouseX/MouseY are window-relative, INCLUDE the border and
+					 * count y downward from the title bar; GL's are client-area
+					 * relative and count y UP from the bottom. The client height
+					 * is Height minus both borders -- the same expression
+					 * vid_ResizeWindow uses (context.c). A fullscreen context
+					 * reads its events from a BACKDROP window, whose borders are
+					 * zero, so the identical arithmetic reduces to the y flip
+					 * there. Handed over raw before this, so a handler written
+					 * against GL's frame saw x shifted by the border and y
+					 * mirrored.
+					 *
+					 * NOT clamped on purpose: an event over the border or past
+					 * the edge during a drag names a point outside the drawable,
+					 * and reporting that honestly beats inventing an edge. */
+					int bl = (int)window->BorderLeft;
+					int bt = (int)window->BorderTop;
+					int ch = (int)window->Height - bt - (int)window->BorderBottom;
+
+					context->MouseHandler((GLint)((int)MouseX - bl),
+					                      (GLint)((ch - 1) - ((int)MouseY - bt)),
+					                      buttons);
 				}
 				break;
 			} /* switch Class */
@@ -1295,6 +1738,17 @@ void MGLMainLoop(GLcontext context)
 		if (context->Idle)
 		{
 			context->Idle();
+		}
+		else if (context->Running == GL_TRUE)
+		{
+			/* Sleep rather than spin a core on GetMsg: with no idle callback
+			 * nothing runs between messages. Flush first -- WaitPort is an exec
+			 * call and a handler's own drawing can leave the bitmap lock held,
+			 * the rule the GetMsg flush above answers. Running is re-tested
+			 * because a handler may have called MGLExit. GLUT never reaches
+			 * this: GLUTMainLoop installs its trampoline unconditionally. */
+			MGLFlushPendingRender(context);
+			WaitPort(window->UserPort);
 		}
 	} /* While running */
 }

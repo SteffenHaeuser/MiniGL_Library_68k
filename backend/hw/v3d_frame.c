@@ -57,7 +57,7 @@ void v3d_frame_compute_pool_sizes(v3d_u16 width, v3d_u16 height,
     *tilesX = divRoundUp(width, tile_width);
     *tilesY = divRoundUp(height, tile_height);
 
-    /* zbuffer: matches PoC/v3d_cle.c:634's shape.
+    /* zbuffer: matches the shape used by an earlier library by the same author.
      *
      * The trailing factor is BYTES PER PIXEL of the depth format, and it must
      * track V3D_OUTPUT_IMAGE_FORMAT_* / V3D_INTERNAL_TYPE_DEPTH* in
@@ -98,11 +98,11 @@ void v3d_frame_compute_pool_sizes(v3d_u16 width, v3d_u16 height,
     *zbuffer_size = V3D_ALIGN_UP(width, 64) * V3D_ALIGN_UP(height, 64)
                     * (v3d_u32)((zbuffer_bits == 16) ? 2 : 4);
 
-    /* tile_state (TSDA): purely tile-count-dependent, matches PoC/v3d_cle.c:636 exactly */
+    /* tile_state (TSDA): purely tile-count-dependent, matches the earlier library exactly */
     *tile_state_size = layer_count * (*tilesY) * (*tilesX) * tsda_per_tile_size;
 
     /* tile_alloc: matches MESA's alloc_tile_state() exactly --
-     * NOT PoC/v3d_cle.c:629-633, which adds an extra "+= 1024*1024" on top of this same
+     * NOT the earlier library, which adds an extra "+= 1024*1024" on top of this same
      * formula. That extra margin isn't needed once OOM spill handling exists (see v3d_frame.h). */
     size = layer_count * (*tilesX) * (*tilesY) * 64;
     size = V3D_ALIGN_UP(size, 4096);

@@ -95,25 +95,44 @@
 #include "../../backend/include/v3d_texture.h"
 #include "../../backend/hw/v3d_debug.h"
 
-static char rcsid[] = "$Id: texture.c,v 1.1.1.1 2000/04/07 19:44:51 tfrieden Exp $";
 
 extern struct ExecBase *SysBase;
 
 void tex_FreeTextures(GLcontext context);
 void tex_SetEnv(GLcontext context, GLenum env);
-void tex_SetFilter(GLcontext context, GLenum min, GLenum mag);
-void tex_SetWrap(GLcontext context, GLenum wrap_s, GLenum wrap_t);
+void tex_SetMinFilter(GLcontext context, GLenum min);
+void tex_SetMagFilter(GLcontext context, GLenum mag);
+void tex_SetWrapS(GLcontext context, GLenum wrap_s);
+void tex_SetWrapT(GLcontext context, GLenum wrap_t);
 extern void GLBlendFunc(GLcontext context, GLenum sfactor, GLenum dfactor);
+extern void MGLFlushPendingRender(GLcontext context);     /* context.c */
+extern int  g_mglv3d_texture_park_overflows;              /* backend/hw/v3d_texture.c */
 
 static ULONG Allocated_Size = 0;
 static ULONG Peak_Size      = 0;
 
+/*
+ * The NULL check is load-bearing, not defensive tidiness. Without it this
+ * function dereferences malloc's result immediately (`*x = size`) and then
+ * returns `x+1`, so on a failed allocation it writes the size through a NULL
+ * pointer and hands back 0x00000004 -- a non-NULL value, which makes every
+ * caller's `if (!p)` test dead code. The caller then writes the converted texture
+ * over low memory starting at address 4, which is where SysBase lives.
+ *
+ * Allocated_Size is also only charged on success: incrementing it before the
+ * allocation is attempted permanently inflates the running total that tex_Free
+ * later decrements.
+ */
 void *tex_Alloc(ULONG size)
 {
 	ULONG *x;
-	Allocated_Size += size+4;
+
 	x=(ULONG *)malloc(size+4);
+	if (!x)
+		return NULL;
+
 	*x = size;
+	Allocated_Size += size+4;
 
 	if (Allocated_Size > Peak_Size) Peak_Size = Allocated_Size;
 
@@ -131,7 +150,16 @@ void tex_Free(void *chunk)
 
 void tex_Statistic(void)
 {
-	printf("Peak Allocation Size: %lu\n", Peak_Size);
+	D(("Peak Allocation Size: %lu\n", Peak_Size));
+}
+
+/* Context teardown. Both counters are file statics, so in the resident library
+ * they outlive the context that charged them and the next program would start
+ * with this one's peak. */
+void tex_ResetStats(void)
+{
+	Allocated_Size = 0;
+	Peak_Size      = 0;
 }
 
 void MGLTexMemStat(GLcontext context, GLint *Current, GLint *Peak)
@@ -312,10 +340,39 @@ void GLDeleteTextures(GLcontext context, GLsizei n, const GLuint *textures)
 			 * away, so there is nothing to carry across and parking alone is
 			 * sufficient.
 			 *
-			 * Park failure (the park list is full) falls back to freeing
-			 * immediately, which leaves that hazard open. */
+			 * ON A FULL LIST, FLUSH FIRST. MGLFlushPendingRender drains the
+			 * park list itself, and only after a wait that actually succeeded,
+			 * so this recovers every block whose command list has retired --
+			 * the reachable case, a delete storm during a level load while the
+			 * last frame's render is still in flight. It stalls, but only on a
+			 * path that has already run out of room.
+			 *
+			 * WAITING CANNOT RECOVER THE REST, which is why the list is sized
+			 * to a stated bound (backend/hw/v3d_texture.c): blocks
+			 * parked since the last present are not marked submitted, so no
+			 * wait retires them -- the danger they carry is in the future, when
+			 * the CL being built now is submitted, not in a render running now.
+			 *
+			 * LAST RESORT IS A LEAK, NOT A FREE. Freeing hands the system pool
+			 * memory a binned draw will name, so the GPU then reads or writes
+			 * whatever is allocated there next -- corruption outside the
+			 * driver. Leaking costs one texture's block, permanently on
+			 * AmigaOS since this is AllocVec memory, and it is bounded by the
+			 * deletes in that one frame. The counter is the signal to raise
+			 * V3D_TEX_PARK_MAX rather than to go looking for a leak. */
 			if (v3d_texture_park_mem(&context->device, &doomed->texture_mem) < 0)
-				v3d_texture_free(&context->device, doomed);
+			{
+				MGLFlushPendingRender(context);
+
+				if (v3d_texture_park_mem(&context->device, &doomed->texture_mem) < 0)
+				{
+					g_mglv3d_texture_park_overflows++;
+					E(("GLDeleteTextures: park list full after a flush -- "
+					   "texture %ld's GPU memory is LEAKED rather than freed "
+					   "under a draw that will name it. %ld so far.\n",
+					   (LONG)name, (LONG)g_mglv3d_texture_park_overflows));
+				}
+			}
 
 			free(doomed);
 			context->textureObjects[name] = NULL;
@@ -325,9 +382,21 @@ void GLDeleteTextures(GLcontext context, GLsizei n, const GLuint *textures)
 	}
 }
 
+/*
+ * Exhaustion reports GL_OUT_OF_MEMORY, not GL_INVALID_OPERATION: GL 1.1 lists
+ * no error for glGenTextures, and 2.5 makes OUT_OF_MEMORY the code for a
+ * resource limit. The names it could not produce are set to 0 rather than left
+ * as the caller had them, so ignoring the error binds the default texture
+ * instead of whatever was on the stack.
+ */
 void GLGenTextures(GLcontext context, GLsizei n, GLuint *textures)
 {
 	int i,j;
+
+	GLFlagError(context, n < 0, GL_INVALID_VALUE);
+
+	if (n < 0 || textures == NULL)
+		return;
 
 	j = 1;
 	for (i=0; i<n; i++)
@@ -339,10 +408,13 @@ void GLGenTextures(GLcontext context, GLsizei n, GLuint *textures)
 			j++;
 		}
 
-		/* If we get here, we found one, or there's nothing available. Flag an error in that case. */
-		if (j == context->textureObjectCount)
+		/* Table full. The test is >=, not ==: a zero-length table leaves j at
+		 * 1, which compares unequal, so == would hand out name 1 and then
+		 * write GeneratedTextures[1] past the allocation. */
+		if (j >= context->textureObjectCount)
 		{
-		    GLFlagError(context, j == context->textureObjectCount, GL_INVALID_OPERATION);
+		    GLFlagError(context, 1, GL_OUT_OF_MEMORY);
+		    while (i < n) { *textures++ = 0; i++; }
 		    return;
 		}
 
@@ -362,10 +434,7 @@ void tex_FreeTextures(GLcontext context)
 	/* Teardown never passes through the normal drain, and vid_CloseWindow frees
 	 * every texture with a render possibly still in flight. Wait once here, so
 	 * the frees below and the park drain that follows are both safe. */
-	{
-		extern void MGLFlushPendingRender(GLcontext context);
-		MGLFlushPendingRender(context);
-	}
+	MGLFlushPendingRender(context);
 
 	for (i=0; i<context->textureObjectCount; i++)
 	{
@@ -402,26 +471,80 @@ void tex_SetEnv(GLcontext context, GLenum env)
 	else
 		tex = context->textureObjects[context->CurrentBinding];
 
-	/* No `if(context->CurTexEnv == env) return;` dedup guard, although the
-	 * original MiniGL had one. `CurTexEnv` is a single CONTEXT-WIDE record
-	 * of the last REQUESTED value, but `texenv_mode` is stored PER TEXTURE
-	 * OBJECT (see this file's header comment) -- so with the guard, binding
-	 * a DIFFERENT texture and requesting the SAME env value again (e.g. two
-	 * textures both meant to be GL_REPLACE) would never write that value
-	 * onto the newly-bound texture, which would keep whatever texenv_mode it
-	 * started with. Nor would the guard save anything worth having: all it
-	 * skips is the two stores below. */
-
-	if (!tex) return;
+	/*
+	 * THE ENVIRONMENT IS PER TEXTURE UNIT, not per texture object -- GL 1.1
+	 * 3.8.9. Binding a different texture must therefore leave it alone.
+	 *
+	 * context->TexEnv[unit] is the state, and draw.c reads it from there. The
+	 * texture object's texenv_mode field stays at the MODULATE it is created
+	 * with and is not read for a single-texture draw.
+	 *
+	 * No texture needs to be bound: GL lets the environment be set for a unit
+	 * whose texture is not bound yet, and the value must survive until it is.
+	 * That is why `tex` is not tested here -- it is unused.
+	 */
+	(void)tex;
 
 	context->CurTexEnv = env;
 
 	switch(env)
 	{
-		case GL_MODULATE:   tex->texenv_mode = V3D_TEXENV_MODULATE; break;
-		case GL_DECAL:      tex->texenv_mode = V3D_TEXENV_DECAL; break;
-		case GL_REPLACE:    tex->texenv_mode = V3D_TEXENV_REPLACE; break;
-		default:            break;
+		case GL_MODULATE:
+		case GL_DECAL:
+		case GL_REPLACE:
+		case GL_BLEND:
+		case GL_ADD:
+			context->TexEnv[context->ActiveTexture ? 1 : 0] = env;
+			break;
+		default:
+			break;
+	}
+}
+
+/*
+ * GL_TEXTURE_ENV_COLOR, which GL_BLEND's equation needs and no other mode
+ * reads. It takes four floats, which the integer entry point cannot carry, so
+ * it needs a function of its own.
+ *
+ * GL_TEXTURE_ENV_MODE is accepted here too, GL allowing either entry point for
+ * either pname, and forwarded so there is one implementation of the mode.
+ *
+ * The colour is NOT clamped. GL clamps it to [0,1] on the way in; the shader
+ * multiplies it by a texel in [0,1] and the result is clamped at the vfpack,
+ * so an out-of-range value cannot reach the framebuffer un-clamped -- but a
+ * negative one would darken rather than being treated as zero. Clamped here
+ * for that reason.
+ */
+void GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, const GLfloat *params)
+{
+	int unit = context->ActiveTexture ? 1 : 0;
+	int i;
+
+	if (target != GL_TEXTURE_ENV || params == NULL)
+	{
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	if (pname == GL_TEXTURE_ENV_MODE)
+	{
+		GLTexEnvi(context, target, pname, (GLint)params[0]);
+		return;
+	}
+
+	if (pname != GL_TEXTURE_ENV_COLOR)
+	{
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	for (i = 0; i < 4; i++)
+	{
+		GLfloat v = params[i];
+
+		if (v < 0.0f) v = 0.0f;
+		if (v > 1.0f) v = 1.0f;
+		context->TexEnvColor[unit][i] = v;
 	}
 }
 
@@ -462,39 +585,118 @@ static UBYTE tex_GLMipFilterNearest(GLenum min_filter)
 	return 1;
 }
 
-void tex_SetFilter(GLcontext context, GLenum min, GLenum mag)
+/* The texture bound to the ACTIVE unit -- VirtualBinding for unit 1,
+ * CurrentBinding for unit 0. The same selection tex_SetEnv, GLBindTexture and
+ * GLTexImage2DNoMIP make. */
+static V3DTexture *tex_Bound(GLcontext context)
 {
-	V3DTexture *tex;
+	if (context->ActiveTexture)
+		return context->textureObjects[context->VirtualBinding];
 
-	if(context->ActiveTexture)
-		tex = context->textureObjects[context->VirtualBinding];
-	else
-		tex = context->textureObjects[context->CurrentBinding];
+	return context->textureObjects[context->CurrentBinding];
+}
+
+/*
+ * ONE AXIS PER CALL, and that is the whole point of these four.
+ *
+ * glTexParameteri names exactly one half of a filter or wrap pair, and GL 1.1
+ * 3.8.3 makes both purely per-object state. So each of these writes ONLY the
+ * field it names and leaves the other exactly as this texture had it. A
+ * function that wrote both halves would have to source the unnamed one from
+ * somewhere outside the texture, which is a leak between texture objects. No invalidation is needed: the texture
+ * state-record cache in draw.c compares all twelve fields on every lookup,
+ * filter and wrap among them.
+ */
+void tex_SetMinFilter(GLcontext context, GLenum min)
+{
+	V3DTexture *tex = tex_Bound(context);
 
 	if (!tex) return;
 
+	/* The GL min enum carries the mip filter too, so both fields move. */
 	tex->min_filter = tex_GLFilter2V3D(min);
-	tex->mag_filter = tex_GLFilter2V3D(mag);
 	tex->mip_filter_nearest = tex_GLMipFilterNearest(min);
 }
 
-void tex_SetWrap(GLcontext context, GLenum wrap_s, GLenum wrap_t)
+void tex_SetMagFilter(GLcontext context, GLenum mag)
 {
-	V3DTexture *tex;
+	V3DTexture *tex = tex_Bound(context);
 
-	if(context->ActiveTexture)
-		tex = context->textureObjects[context->VirtualBinding];
-	else
-		tex = context->textureObjects[context->CurrentBinding];
+	if (!tex) return;
+
+	tex->mag_filter = tex_GLFilter2V3D(mag);
+}
+
+void tex_SetWrapS(GLcontext context, GLenum wrap_s)
+{
+	V3DTexture *tex = tex_Bound(context);
 
 	if (!tex) return;
 
 	tex->wrap_s = (wrap_s == GL_REPEAT) ? V3D_TEXWRAP_REPEAT : V3D_TEXWRAP_CLAMP;
+}
+
+void tex_SetWrapT(GLcontext context, GLenum wrap_t)
+{
+	V3DTexture *tex = tex_Bound(context);
+
+	if (!tex) return;
+
 	tex->wrap_t = (wrap_t == GL_REPEAT) ? V3D_TEXWRAP_REPEAT : V3D_TEXWRAP_CLAMP;
 }
 
 void GLTexEnvi(GLcontext context, GLenum target, GLenum pname, GLint param)
 {
+	/*
+	 * target, pname AND param ARE ALL VALIDATED. gl.h maps glTexEnvf and
+	 * glTexEnviv onto this function, so an unchecked `param` would be installed
+	 * as the environment mode from any of those spellings.
+	 *
+	 * GL_TEXTURE_ENV_COLOR is refused here: it needs four floats, which this
+	 * signature cannot carry, and GLTexEnvfv takes it instead. Every glTexEnv*
+	 * call across the client applications passes GL_TEXTURE_ENV_MODE, so
+	 * no game reaches that refusal.
+	 */
+	if (target != GL_TEXTURE_ENV)
+	{
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	if (pname == GL_TEXTURE_ENV_COLOR)
+	{
+		/* Four floats through a one-int entry point cannot be meant. GL has no
+		 * integer spelling for this pname either, so this is the right refusal
+		 * rather than a dropped call -- see GLTexEnvfv, which takes it. */
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	if (pname != GL_TEXTURE_ENV_MODE)
+	{
+		/* Anything else names nothing: GL 1.1 defines these two pnames only,
+		 * and GL_COMBINE's family is 1.3. */
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
+	}
+
+	switch (param)
+	{
+		case GL_MODULATE:
+		case GL_DECAL:
+		case GL_REPLACE:
+		case GL_BLEND:
+		case GL_ADD:
+			break;
+
+		default:
+			/* GL_COMBINE and the rest of the 1.3 family land here. Refused
+			 * rather than stored: a mode kept as state with no shader behind it
+			 * renders as GL_MODULATE, which is a silent wrong answer. */
+			GLFlagError(context, 1, GL_INVALID_ENUM);
+			return;
+	}
+
 	/* Records the mode in the ACTIVE unit's TexEnv entry and always passes
 	 * it to tex_SetEnv, which resolves CurrentBinding vs VirtualBinding and
 	 * applies it to the texture bound on that unit. The original MiniGL
@@ -534,21 +736,54 @@ void GLTexEnvi(GLcontext context, GLenum target, GLenum pname, GLint param)
  * scoped to-and-reverted-after one buffered draw. A caller must therefore
  * make this call BEFORE the glBegin/glEnd pair it is meant to affect, not
  * after it as the original's buffered model allowed.
+ *
+ * That order requirement is DETECTED rather than only documented. The
+ * original's buffered model is not restored and must not be: multitexturing
+ * here is one shader pass that samples both units, so there is no second pass
+ * for BSrc/BDst to drive, and the original's own early-out is `polypointer ==
+ * 0` -- there is no polypointer. Restoring it would mean adding a deferral
+ * buffer purely to honour a call-order convention.
  */
+
+/* Set here, cleared by draw.c when a multitextured draw is actually emitted.
+ * Still set at the NEXT call means nothing multitextured was drawn in between,
+ * which is base MiniGL's buffered order -- where this call flushed the geometry
+ * itself. A program that calls this exactly once is therefore not caught; the
+ * pattern this finds is the per-frame one both the multitexture demo and
+ * a client application use. */
+int g_mgl_mtex_flush_pending = 0;
+
 void MGLDrawMultitexBuffer(GLcontext context, GLenum BSrc, GLenum BDst, GLenum TexEnv)
 {
-	V3DTexture *tex1 = context->textureObjects[context->VirtualBinding];
+	static int said = 0;
 
-	if (tex1)
+	/* Validated before anything changes, as GLTexEnvi validates its target and
+	 * pname. MODULATE, DECAL and REPLACE are the three draw.c can dispatch, and
+	 * it maps everything else to MODULATE -- so recording an unsupported mode
+	 * leaves context->TexEnv[1] disagreeing with the combine the draw takes. The
+	 * blend factors need no check here: GLBlendFunc already raises
+	 * GL_INVALID_ENUM for both. */
+	if (TexEnv != GL_MODULATE && TexEnv != GL_DECAL && TexEnv != GL_REPLACE)
 	{
-		switch (TexEnv)
-		{
-			case GL_MODULATE: tex1->texenv_mode = V3D_TEXENV_MODULATE; break;
-			case GL_DECAL:    tex1->texenv_mode = V3D_TEXENV_DECAL; break;
-			case GL_REPLACE:  tex1->texenv_mode = V3D_TEXENV_REPLACE; break;
-			default: break;
-		}
+		GLFlagError(context, 1, GL_INVALID_ENUM);
+		return;
 	}
+
+	if (g_mgl_mtex_flush_pending && !said)
+	{
+		said = 1;
+		E(("MGLDrawMultitexBuffer: called again with no multitextured draw in "
+		   "between. Base MiniGL flushed a buffered draw HERE; this driver "
+		   "cannot, because the geometry already went out at glEnd. Call it "
+		   "BEFORE the glBegin/glEnd pair it should affect. Said once per run.\n"));
+	}
+	g_mgl_mtex_flush_pending = 1;
+
+	/* The texture object's texenv_mode is deliberately NOT written. draw.c reads
+	 * context->TexEnv[1] for the unit's combine mode and does not read the
+	 * object's field, so the write would be dead -- and that field's per-object
+	 * permanence is what produces a client application's white-texture failure (its surface
+	 * path's own comment), so writing it keeps that failure one `if` away. */
 	context->TexEnv[1] = TexEnv;
 
 	GLBlendFunc(context, BSrc, BDst);
@@ -556,41 +791,33 @@ void MGLDrawMultitexBuffer(GLcontext context, GLenum BSrc, GLenum BDst, GLenum T
 
 void GLTexParameteri(GLcontext context, GLenum target, GLenum pname, GLint param)
 {
-	GLenum min, mag;
-	GLenum wraps, wrapt;
 	switch(pname)
 	{
-		/* tex_SetFilter takes (context, min, mag) in that order, and the two
-		 * filter cases below must not pass them TRANSPOSED: that would leave a
-		 * texture with its two filters exchanged. It would also break
-		 * mipmapping, because tex_SetFilter derives the mip filter from its
-		 * FIRST argument -- tex_GLMipFilterNearest(min) -- and GL restricts
-		 * the MAG filter to GL_NEAREST/GL_LINEAR. A mipmap enum could then
-		 * never reach it, so it would always return its non-mipmap fallback of
-		 * 1 and every GL_*_MIPMAP_LINEAR mode would behave as
-		 * GL_*_MIPMAP_NEAREST. */
+		/*
+		 * Each case writes ONLY the field it names, onto the texture bound at
+		 * the active unit. Passing the unnamed half from anywhere outside the
+		 * texture would stamp it with another texture's value.
+		 *
+		 * No context-wide copy exists: the four GLcontext fields that could
+		 * hold one are reserved (context.h), this driver having no
+		 * glGetTexParameter and nothing else to read them. All four carry
+		 * something else: RequestedBuffers, CurPolygonModeBack, CloseWorkbench
+		 * and PerspectiveMapping_State.
+		 */
 		case GL_TEXTURE_MIN_FILTER:
-			mag = context->MagFilter;
-			tex_SetFilter(context, (GLenum)param, mag);
-			context->MinFilter = (GLenum)param;
+			tex_SetMinFilter(context, (GLenum)param);
 			break;
 
 		case GL_TEXTURE_MAG_FILTER:
-			min = context->MinFilter;
-			tex_SetFilter(context, min, (GLenum)param);
-			context->MagFilter = (GLenum)param;
+			tex_SetMagFilter(context, (GLenum)param);
 			break;
 
 		case GL_TEXTURE_WRAP_S:
-			wrapt = context->WrapT;
-			tex_SetWrap(context, (GLenum)param, wrapt);
-			context->WrapS = (GLenum)param;
+			tex_SetWrapS(context, (GLenum)param);
 			break;
 
 		case GL_TEXTURE_WRAP_T:
-			wraps = context->WrapS;
-			tex_SetWrap(context, wraps, (GLenum)param);
-			context->WrapT = (GLenum)param;
+			tex_SetWrapT(context, (GLenum)param);
 			break;
 		default:
 			GLFlagError(context, 1, GL_INVALID_ENUM);
@@ -669,6 +896,37 @@ void GLPixelStorei(GLcontext context, GLenum pname, GLint param)
 	}
 }
 
+/*
+ * A texture object with no image yet. GL 1.1 3.8.8 creates one the first time a
+ * name is bound, with the default state below, and it stays INCOMPLETE until
+ * glTexImage2D gives it a level 0 -- which is what width == 0 records here.
+ * draw.c treats an incomplete texture as no texture at all, so binding a fresh
+ * name disables texturing rather than sampling memory that was never allocated.
+ *
+ * These defaults live here, at creation, and nowhere else. glTexImage2D must not
+ * reapply them when it (re)allocates: that silently discards any
+ * glTexParameteri the application made between the bind and the upload --
+ * the ordering every Quake engine's lightmap setup uses.
+ */
+static V3DTexture *tex_NewObject(GLcontext context, GLuint name)
+{
+	V3DTexture *tex = (V3DTexture *)malloc(sizeof(V3DTexture));
+
+	if (!tex)
+		return NULL;
+
+	memset(tex, 0, sizeof(V3DTexture));
+	tex->min_filter         = tex_GLFilter2V3D(GL_NEAREST);
+	tex->mag_filter         = tex_GLFilter2V3D(GL_LINEAR);
+	tex->mip_filter_nearest = tex_GLMipFilterNearest(GL_NEAREST);
+	tex->wrap_s             = V3D_TEXWRAP_REPEAT;
+	tex->wrap_t             = V3D_TEXWRAP_REPEAT;
+	tex->texenv_mode        = V3D_TEXENV_MODULATE;
+
+	context->textureObjects[name] = tex;
+	return tex;
+}
+
 void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
 {
    int active;
@@ -698,6 +956,13 @@ void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
 	if (context->textureObjects == NULL)
 		return;
 
+	/* GL 1.1 3.8.8: the first bind of an unused name CREATES the object, so a
+	 * glTexParameteri before any glTexImage2D has an object to reach. Name 0 is
+	 * the default texture and is never created here. A failed allocation leaves
+	 * the slot NULL, which the draw path treats as no texture. */
+	if (texture != 0 && context->textureObjects[texture] == NULL)
+		(void)tex_NewObject(context, texture);
+
    active = context->ActiveTexture;
 
 
@@ -708,13 +973,10 @@ void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
 	 * VirtualBinding exactly as the GL-side state around it is. */
 	context->backend.bound_texture[1] = context->textureObjects[context->VirtualBinding];
 
-	if (context->textureObjects[context->VirtualBinding] == NULL)
-	{   /* Set to default for unbound objects */
-		context->MinFilter = GL_NEAREST;
-		context->MagFilter = GL_NEAREST;
-		context->WrapS     = GL_REPEAT;
-		context->WrapT     = GL_REPEAT;
-	}
+	/* A BIND CHANGES NO FILTER OR WRAP. Both are per-object state living on
+	 * the texture object, so there is nothing context-wide for a bind to
+	 * reset -- and resetting one would change the filtering a later
+	 * glTexParameteri hands the NEXT texture. */
    }
    else
    {
@@ -722,14 +984,10 @@ void GLBindTexture(GLcontext context, GLenum target, GLuint texture)
 	/* See the bound_texture[1] comment in the active-unit branch above. */
 	context->backend.bound_texture[0] = context->textureObjects[context->CurrentBinding];
 
-	if (context->textureObjects[context->CurrentBinding] == NULL)
-	{   /* Set to default for unbound objects */
-		context->TexEnv[0] = GL_MODULATE;
-		context->MinFilter = GL_NEAREST;
-		context->MagFilter = GL_NEAREST;
-		context->WrapS     = GL_REPEAT;
-		context->WrapT     = GL_REPEAT;
-	}
+	/* BINDING CHANGES NO ENVIRONMENT. GL 1.1 3.8.9 makes the environment
+	 * per UNIT, so a unit set to GL_REPLACE stays GL_REPLACE whatever texture
+	 * arrives on it. Filter and wrap are untouched for the matching reason --
+	 * see the unit-1 branch above. */
    }
 }
 
@@ -834,12 +1092,24 @@ static int tex_GLFormatToSrcFmt(GLenum format, GLenum type)
 		case 4:       return V3D_SRCFMT_RGBA8;
 		case 3:       return V3D_SRCFMT_RGB8;
 		case GL_LUMINANCE_ALPHA: return V3D_SRCFMT_LA8;
+		case 2:       return V3D_SRCFMT_LA8;
 		/* One byte per texel, expanded by the backend to (L,L,L,1) and
-		 * (1,1,1,A). The GL 1.x component-count spellings 1 and 2 are NOT
-		 * accepted here: this header's enum is positionally numbered and
-		 * GL_ALPHA itself is 1, so "1 = luminance" cannot be told apart from
-		 * GL_ALPHA. */
+		 * (1,1,1,A).
+		 *
+		 * 1 AND 2 ARE GL'S COMPONENT COUNTS, meaning luminance and
+		 * luminance-alpha. They are accepted for the same reason 3 and 4 above
+		 * are, and with the same looseness: GL 1.1 allows the counts only as an
+		 * INTERNALFORMAT, and this switch sees the pixel-data `format`, so all
+		 * four numeric cases are an extension rather than conformance. The
+		 * tokens carry their real GL values (GL_ALPHA is 0x1906), and nothing
+		 * gl.h defines with the value 1 or 2 is a pixel format, so the two
+		 * cannot be confused.
+		 *
+		 * ONE DIVERGENCE FROM BASE MiniGL, deliberately: there literal 1 WAS
+		 * GL_ALPHA under that positional enum, so a 1 meant A8. GL's meaning is
+		 * luminance, and that is what it maps to here. */
 		case GL_LUMINANCE: return V3D_SRCFMT_L8;
+		case 1:            return V3D_SRCFMT_L8;
 		case GL_ALPHA:     return V3D_SRCFMT_A8;
 
 		/* Expanded through the palette to RGBA8 on the CPU -- see
@@ -1149,6 +1419,8 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
 	void *rgba8;
 	V3DTexture *tex;
 	GLboolean was_new;
+	/* GL-level sampler state, carried across v3d_texture_alloc (see below). */
+	v3d_u8 save_min, save_mag, save_mipnear, save_wraps, save_wrapt, save_env;
 
 	if(context->ActiveTexture)
 		current = context->VirtualBinding;
@@ -1166,6 +1438,19 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
 		return;
 	}
 	if (gltarget != GL_TEXTURE_2D) { GLFlagError(context, 1, GL_INVALID_ENUM); return; }
+
+	/* GL 1.1 3.8.1 errors: a negative level, a size outside
+	 * 0..MGL_MAX_TEXTURE_SIZE, or a border this driver cannot honour. Size
+	 * matters most -- width and height are cast to v3d_u16 below, so an
+	 * oversized or negative one wraps and the upload goes ahead against the
+	 * wrong dimensions, or leaves the name with no object and no error. */
+	if (level < 0 || border != 0 ||
+	    width  < 0 || width  > MGL_MAX_TEXTURE_SIZE ||
+	    height < 0 || height > MGL_MAX_TEXTURE_SIZE)
+	{
+		GLFlagError(context, 1, GL_INVALID_VALUE);
+		return;
+	}
 
 	/* Before anything allocates, frees or writes texels -- see
 	 * tex_SyncBeforeModify. Covers all three of this function's destructive
@@ -1262,38 +1547,71 @@ void GLTexImage2DNoMIP(GLcontext context, GLenum gltarget, GLint level, GLint in
 	{
 		if (tex == NULL)
 		{
-			tex = (V3DTexture *)malloc(sizeof(V3DTexture));
+			/* Reached only when the name was never bound -- glBindTexture
+			 * creates the object (GL 1.1 3.8.8), defaults and all. */
+			tex = tex_NewObject(context, current);
 			if (!tex) return;
-			memset(tex, 0, sizeof(V3DTexture));
+			was_new = GL_TRUE;
 		}
 		else
 		{
 			v3d_texture_free(&context->device, tex);
 		}
 
+		/*
+		 * v3d_texture_alloc OVERWRITES THE SAMPLER FIELDS -- of its own accord
+		 * it sets min/mag to NEAREST and both wraps to V3D_TEXWRAP_BORDER
+		 * (v3d_texture.c). Those are GL-level state here, so they are carried
+		 * across the call and put back below. Losing them leaves every texture
+		 * wrapping to a transparent-black border, and world geometry whose
+		 * texcoords run far outside [0,1] then renders black.
+		 */
+		save_min     = tex->min_filter;
+		save_mag     = tex->mag_filter;
+		save_mipnear = tex->mip_filter_nearest;
+		save_wraps   = tex->wrap_s;
+		save_wrapt   = tex->wrap_t;
+		save_env     = tex->texenv_mode;
+
 		if (v3d_texture_alloc(&context->device, tex, (v3d_u16)width, (v3d_u16)height) < 0)
 		{
-			/* Nothing is flagged and there is no fallback: the name is left
-			 * with no texture object (see the slot clearing below). The D()
-			 * is silent unless this file is built with -DDEBUG. */
+			/* GL 1.1 2.5: an allocation that cannot be satisfied is
+			 * GL_OUT_OF_MEMORY. There is no fallback (see the slot
+			 * clearing below); the D() is silent unless this file is
+			 * built with -DDEBUG. */
+			GLFlagError(context, 1, GL_OUT_OF_MEMORY);
 			D(("[texture] v3d_texture_alloc FAILED: texnum=%ld %ldx%ld\n",
 				(LONG)current, (LONG)width, (LONG)height));
+
+			/* The same unbinding GLDeleteTextures does, and for the same
+			 * reason: draw.c's state-record cache is keyed on the V3DTexture
+			 * pointer and malloc can hand this address to the next texture,
+			 * and bound_texture[] caches that pointer per unit. The BINDING is
+			 * left alone -- the name is still bound, it just has no object. */
+			gl_InvalidateTexStateCache(tex);
+			if (context->backend.bound_texture[0] == tex)
+				context->backend.bound_texture[0] = NULL;
+			if (context->backend.bound_texture[1] == tex)
+				context->backend.bound_texture[1] = NULL;
+
 			free(tex);
-			/* was_new==FALSE means textureObjects[current] still points at
-			 * the struct just freed above -- clear it so nothing can reach
-			 * it again (matches the was_new==TRUE case, which never sets
-			 * this slot in the first place when alloc fails). */
-			if (!was_new)
-				context->textureObjects[current] = NULL;
+			/* The slot points at the struct just freed, whichever way we got
+			 * here: tex_NewObject fills it in the was_new case too, so an
+			 * `if (!was_new)` guard would leave a dangling pointer. */
+			context->textureObjects[current] = NULL;
 			return;
 		}
 
-		tex->min_filter = tex_GLFilter2V3D(context->MinFilter);
-		tex->mag_filter = tex_GLFilter2V3D(context->MagFilter);
-		tex->mip_filter_nearest = tex_GLMipFilterNearest(context->MinFilter);
-		tex->wrap_s = (context->WrapS == GL_REPEAT) ? V3D_TEXWRAP_REPEAT : V3D_TEXWRAP_CLAMP;
-		tex->wrap_t = (context->WrapT == GL_REPEAT) ? V3D_TEXWRAP_REPEAT : V3D_TEXWRAP_CLAMP;
-		tex->texenv_mode = V3D_TEXENV_MODULATE;
+		/* Back to the application's state. It is set once by tex_NewObject and
+		 * is the application's to change after that: a glTexParameteri between
+		 * the bind and this upload must survive it, and a re-upload at a new
+		 * size must not quietly reset a texture to defaults. */
+		tex->min_filter         = save_min;
+		tex->mag_filter         = save_mag;
+		tex->mip_filter_nearest = save_mipnear;
+		tex->wrap_s             = save_wraps;
+		tex->wrap_t             = save_wrapt;
+		tex->texenv_mode        = save_env;
 
 		context->textureObjects[current] = tex;
 	}
@@ -1359,8 +1677,8 @@ void GLTexImage2D(GLcontext context, GLenum gltarget, GLint level, GLint interna
  * (x,y,width,height) sub-rectangle within a larger tiled image, not just the
  * (0,0)-origin full-image case GLTexImage2DNoMIP uses.
  * Same GL-format -> RGBA8 conversion path as GLTexImage2DNoMIP
- * (tex_GLFormatToSrcFmt/tex_ConvertToRGBA8), always through the scratch
- * buffer -- there is no RGBA8 fast path here.
+ * (tex_GLFormatToSrcFmt/tex_ConvertToRGBA8), and the same RGBA8 fast path,
+ * which hands the caller's own buffer to the backend and copies nothing.
  */
 void GLTexSubImage2DNoMIP(GLcontext context, GLenum target, GLint level, GLint xoffset, GLint yoffset, GLsizei width, GLsizei height, GLenum format, GLenum type, GLvoid *pixels)
 {
@@ -1410,6 +1728,13 @@ void GLTexSubImage2DNoMIP(GLcontext context, GLenum target, GLint level, GLint x
 	GLFlagError(context, level < 0 || (v3d_u8)level >= tex->num_levels, GL_INVALID_VALUE);
 	if (level < 0 || (v3d_u8)level >= tex->num_levels) return;
 
+	/* A NEGATIVE SIZE IS REJECTED HERE, as GL 1.1 requires. It matters more
+	 * than it looks: the offset test below compares xoffset + width, which a
+	 * negative width passes, and the fast path further down performs no
+	 * allocation, so nothing downstream would catch a mixed-sign box. */
+	GLFlagError(context, (width < 0) || (height < 0), GL_INVALID_VALUE);
+	if ((width < 0) || (height < 0)) return;
+
 	if (type == MGL_UNSIGNED_SHORT_5_6_5 || type == MGL_UNSIGNED_SHORT_4_4_4_4)
 	    format = type;
 
@@ -1430,6 +1755,23 @@ void GLTexSubImage2DNoMIP(GLcontext context, GLenum target, GLint level, GLint x
 		                     ((yoffset + height) > lvl_h), GL_INVALID_VALUE);
 		if ((xoffset < 0) || (yoffset < 0) ||
 		    ((xoffset + width) > lvl_w) || ((yoffset + height) > lvl_h)) return;
+	}
+
+	/* THE SAME THREE-TERM FAST PATH GLTexImage2DNoMIP HAS, and it needs all
+	 * three terms. The uploader takes a const source with its own stride and
+	 * addresses it from the box origin, so a tightly packed RGBA8 buffer is
+	 * byte-for-byte what the scratch would have held; tex_UnpackIsTrivial is
+	 * what rules out skip pixels, a row length and alignment padding, and
+	 * !no_alpha is what keeps an RGBA8 source bound for an RGB internalformat
+	 * on the converting path, since its alpha has to be forced and that cannot
+	 * be done in the caller's own buffer. */
+	if (srcfmt == V3D_SRCFMT_RGBA8 && !tex->no_alpha
+	    && tex_UnpackIsTrivial(context, width))
+	{
+		v3d_texture_upload_rgba8_subimage(&context->device, tex, (v3d_u8)level,
+		                                  pixels, (v3d_u32)(width * 4),
+		                                  xoffset, yoffset, width, height);
+		return;
 	}
 
 	/* A sub-image is stored in the texture's own internalformat, so an RGB
@@ -1484,7 +1826,7 @@ void GLTexSubImage2D(GLcontext context, GLenum target, GLint level, GLint xoffse
  *    and restored around the upload.
  *
  * 2. GL's x,y are BOTTOM-origin window coordinates. The readback
- *    (mgl_ReadPixelsTightRGB, others.c -- GLReadPixels' own conversion with
+ *    (mgl_ReadPixelsTightRGBA, others.c -- GLReadPixels' own conversion with
  *    the caller's PACK state ignored, because this scratch is always tightly
  *    packed) takes them as GL does, so they pass straight through. The read
  *    also includes everything drawn so far this frame, like glReadPixels
@@ -1494,18 +1836,27 @@ void GLTexSubImage2D(GLcontext context, GLenum target, GLint level, GLint xoffse
  *    output untouched, so the scratch is cleared first: GL leaves those
  *    texels undefined, and undefined heap is worse than black.
  *
- * The copy reads GL_RGB, so the texels are opaque: that source format fills
- * alpha with 255.
+ * THE COPY CARRIES THE FRAMEBUFFER'S ALPHA. This framebuffer HAS an alpha
+ * channel -- mgl_ReadColor takes it from the BGRA32 target's fourth byte -- so
+ * GL requires the copy to use it. Reading GL_RGB instead fills alpha with 255,
+ * which makes every render-to-texture copy opaque and puts the alpha beyond
+ * reach of any internalformat that asks for it. An RGB
+ * destination still comes out opaque, but that is decided by the
+ * DESTINATION: glCopyTexImage2D's internalformat through
+ * tex_InternalFormatNoAlpha, glCopyTexSubImage2D's through the texture's own
+ * recorded tex->no_alpha, which GLTexSubImage2DNoMIP already honours.
  */
 /* Shared by both copy entry points: the framebuffer rectangle as tightly
- * packed RGB, or NULL. Caller frees. */
-static GLubyte *tex_ReadFramebufferRGB(GLcontext context, GLint x, GLint y,
-                                       GLsizei width, GLsizei height)
+ * packed RGBA, or NULL. Caller frees. */
+static GLubyte *tex_ReadFramebufferRGBA(GLcontext context, GLint x, GLint y,
+                                        GLsizei width, GLsizei height)
 {
 	GLubyte *scratch;
-	extern void mgl_ReadPixelsTightRGB(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height, GLubyte *pixels);
+	size_t n = (size_t)(width * height);
+	size_t i;
+	extern void mgl_ReadPixelsTightRGBA(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height, GLubyte *pixels);
 
-	scratch = (GLubyte *)malloc((size_t)(width * height * 3));
+	scratch = (GLubyte *)malloc(n * 4);
 	if (!scratch)
 	{
 		GLFlagError(context, 1, GL_OUT_OF_MEMORY);
@@ -1514,10 +1865,18 @@ static GLubyte *tex_ReadFramebufferRGB(GLcontext context, GLint x, GLint y,
 
 	/* A rectangle reaching outside the framebuffer leaves the readback's
 	 * pixels untouched. GL leaves those texels undefined; undefined heap is
-	 * worse than black. */
-	memset(scratch, 0, (size_t)(width * height * 3));
+	 * worse than black. OPAQUE black, not transparent: a zero alpha would
+	 * interact with alpha test and blending, which is the same reasoning
+	 * tex_BuildPaletteLUT gives for its own out-of-range entries. */
+	for (i = 0; i < n; i++)
+	{
+		scratch[i * 4 + 0] = 0;
+		scratch[i * 4 + 1] = 0;
+		scratch[i * 4 + 2] = 0;
+		scratch[i * 4 + 3] = 255;
+	}
 
-	mgl_ReadPixelsTightRGB(context, x, y, width, height, scratch);
+	mgl_ReadPixelsTightRGBA(context, x, y, width, height, scratch);
 	return scratch;
 }
 
@@ -1546,10 +1905,10 @@ static void tex_UploadCopiedRect(GLcontext context, GLenum target, GLint level,
 	 * two do store mip chains.) */
 	if (defining)
 		GLTexImage2D(context, target, level, internalformat,
-		             width, height, 0, GL_RGB, GL_UNSIGNED_BYTE, scratch);
+		             width, height, 0, GL_RGBA, GL_UNSIGNED_BYTE, scratch);
 	else
 		GLTexSubImage2D(context, target, level, xoffset, yoffset,
-		                width, height, GL_RGB, GL_UNSIGNED_BYTE, scratch);
+		                width, height, GL_RGBA, GL_UNSIGNED_BYTE, scratch);
 
 	context->CurUnpackRowLength  = save_rowlen;
 	context->CurUnpackSkipPixels = save_skipx;
@@ -1582,7 +1941,7 @@ void GLCopyTexSubImage2D(GLcontext context, GLenum target, GLint level,
 	if (tex_CopyArgsBad(context, target, width, height))
 		return;
 
-	scratch = tex_ReadFramebufferRGB(context, x, y, width, height);
+	scratch = tex_ReadFramebufferRGBA(context, x, y, width, height);
 	if (!scratch) return;
 
 	tex_UploadCopiedRect(context, target, level, xoffset, yoffset, 0,
@@ -1616,7 +1975,7 @@ void GLCopyTexImage2D(GLcontext context, GLenum target, GLint level,
 		return;
 	}
 
-	scratch = tex_ReadFramebufferRGB(context, x, y, width, height);
+	scratch = tex_ReadFramebufferRGBA(context, x, y, width, height);
 	if (!scratch) return;
 
 	tex_UploadCopiedRect(context, target, level, 0, 0, (GLint)internalformat,
@@ -1636,9 +1995,13 @@ void GLCopyTexImage2D(GLcontext context, GLenum target, GLint level,
  * alongside this header's own GL_SPHERE_MAP, because a client using REAL GL
  * headers passes 0x2402 -- same distinction as GL_TEXTURE0_ARB in gl.h.
  *
- * DELIBERATE DEVIATION: the default stays GL_SPHERE_MAP (context.c) where GL
- * says GL_EYE_LINEAR, so a caller that enables texgen without ever naming a
- * mode still gets a sphere map.
+ * THE DEFAULT IS GL_EYE_LINEAR, GL's own (context.c). Every texgen caller in the
+ * six trees sets its mode in the same breath as the enable: a client application does it
+ * at its model-draw sites, all six of a client application's scenes that use texgen call
+ * glTexGeni (29 calls), and so does every gears demo. The client applications use no texgen at all. The bare glEnable sites in glxsglut scene05
+ * inherit that scene's OWN earlier GL_SPHERE_MAP, which is sticky state, not
+ * this default. GL_EYE_LINEAR is itself a generated mode, so
+ * the default does not take draw.c's CPU texgen path out of play.
  *
  * The parameter names are the original's: `mode` is GL's pname and `map` is
  * its value. They stay as they are because the prototype is published.
@@ -1776,8 +2139,12 @@ static GLenum tex_PaletteBaseFormat(GLint internalformat)
 	switch (internalformat)
 	{
 		case GL_ALPHA: case GL_ALPHA8:                        return GL_ALPHA;
-		case GL_LUMINANCE: case GL_LUMINANCE8:                return GL_LUMINANCE;
-		case GL_LUMINANCE_ALPHA: case GL_LUMINANCE8_ALPHA8:   return GL_LUMINANCE_ALPHA;
+		/* 1 and 2 belong here for the same reason 3 and 4 already do, and here
+		 * they are plain GL 1.1 rather than an extension: this argument really
+		 * is an internalformat, which is where GL allows the component counts. */
+		case 1: case GL_LUMINANCE: case GL_LUMINANCE8:        return GL_LUMINANCE;
+		case 2: case GL_LUMINANCE_ALPHA:
+		case GL_LUMINANCE8_ALPHA8:                            return GL_LUMINANCE_ALPHA;
 		case GL_INTENSITY: case GL_INTENSITY8:                return GL_INTENSITY;
 		case 3: case GL_RGB: case GL_RGB5: case GL_RGB8:      return GL_RGB;
 		case 4: case GL_RGBA: case GL_RGB5_A1: case GL_RGBA8: return GL_RGBA;
@@ -1873,16 +2240,20 @@ void GLColorTable(GLcontext context, GLenum target, GLenum internalformat, GLint
 	 * not a palette, or a context with no palette storage reach the copy
 	 * loops. A negative width is refused the same way. */
 	if (width < 0 || width > 256) { GLFlagError(context, 1, GL_INVALID_VALUE); return; }
-	/* Accept BOTH targets. GL_COLOR_TABLE is this header's own positional
-	 * enum, named by a client compiled against this header.
-	 * GL_SHARED_TEXTURE_PALETTE_EXT is the real 0x81FB spec value that a
-	 * client built against its own GL headers passes instead; refusing it
-	 * would leave such a client's palette uninstalled.
+	/* Accept all THREE targets, each writing the one context palette.
+	 * GL_COLOR_TABLE is this header's own positional enum;
+	 * GL_SHARED_TEXTURE_PALETTE_EXT the real 0x81FB value a client built
+	 * against its own GL headers passes; GL_TEXTURE_2D the entry point of
+	 * EXT_paletted_texture, which glGetString advertises -- refusing it sets a
+	 * STICKY GL_INVALID_OPERATION and then fails that client's upload too,
+	 * nothing having been stored.
 	 *
-	 * The semantics match GL_EXT_shared_texture_palette exactly:
-	 * `where = context->PaletteData` below means ONE palette per context,
-	 * shared by every texture -- not a per-texture palette. */
-	if (target != GL_COLOR_TABLE && target != GL_SHARED_TEXTURE_PALETTE_EXT)
+	 * Still ONE palette per context, not per texture: correct for
+	 * set-palette-then-upload, because the indices are expanded through the
+	 * current palette at upload time, and unable either way to honour a palette
+	 * changed after a texture is resident -- the index image is not retained. */
+	if (target != GL_COLOR_TABLE && target != GL_SHARED_TEXTURE_PALETTE_EXT
+	    && target != GL_TEXTURE_2D)
 	{
 		GLFlagError(context, 1, GL_INVALID_OPERATION);
 		return;

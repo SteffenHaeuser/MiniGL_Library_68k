@@ -24,7 +24,13 @@
 #ifndef __MINIGL_COMPILER_H
 #define __MINIGL_COMPILER_H
 
+/* Both pairs guarded for the same reason as mgl/context.h's: VBCC needs Amiga
+ * alignment told for these OS headers, GCC does it anyway and only warns
+ * -Wunknown-pragmas, which every -Wall compile of gl/src then repeats four
+ * times. No layout changes for either compiler. */
+#ifdef __VBCC__
 #pragma amiga-align
+#endif
 
 #include <exec/types.h>
 #include <exec/exec.h>
@@ -37,17 +43,23 @@
 #include <devices/timer.h>
 #include <cybergraphx/cybergraphics.h>
 
+#ifdef __VBCC__
 #pragma default-align
+#endif
 
 #define UNUSED
 
+#ifdef __VBCC__
 #pragma amiga-align
+#endif
 #include <proto/intuition.h>
 #include <proto/exec.h>
 #include <proto/graphics.h>
 #include <proto/dos.h>
 #include <proto/cybergraphics.h>
+#ifdef __VBCC__
 #pragma default-align
+#endif
 
 /* Resolved via -I pointing at gl/include/. */
 #include <mgl/gl.h>

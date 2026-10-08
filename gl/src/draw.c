@@ -104,7 +104,6 @@ static inline void swap_float32_into_inline(void *dst, float val)
 }
 #define swap_float32_into(dst, val) swap_float32_into_inline((dst), (val))
 
-static char rcsid[] ="$Id: draw.c,v 1.4 2001/02/01 14:36:49 tfrieden Exp $";
 
 extern void gl_FrameBegin(GLcontext context); /* context.c */
 extern void hc_ClipAndDrawPoly(GLcontext context, MGLPolygon *poly, ULONG or_codes); /* hclip.c */
@@ -112,6 +111,7 @@ extern void hc_ClipAndDrawLine(GLcontext context, MGLPolygon *poly, ULONG or_cod
 extern GLboolean hc_DecideFrontface(GLcontext context, MGLVertex *v0, MGLVertex *v1, MGLVertex *v2); /* hclip.c */
 extern void m_CombineMatrices(GLcontext context); /* matrix.c */
 extern void m_BuildInverted(GLcontext context); /* matrix.c */
+extern int g_mgl_mtex_flush_pending; /* texture.c */
 
 /* gl_FrameBegin returns at once while a pass is open and no split is pending;
  * that test is made here, so the common case costs no call. */
@@ -123,75 +123,8 @@ static inline void d_FrameBegin(GLcontext context)
 		gl_FrameBegin(context);
 }
 
-#define CLIP_EPS (1e-7)
-
-/*
- * A conservative CPU-side pre-cull. It reads .bx/.by/.bw, so it belongs
- * to the CPU clipping path, and nothing calls it.
- *
- * Unlike hc_DecideFrontface (hclip.c), whose winding test loses reliable
- * precision as a primitive's true screen-space area shrinks, this only
- * culls when CONFIDENT the result is numerically trustworthy, via two
- * checks:
- *  - Both edge vectors (a-b, c-b) must have a real, non-tiny length --
- *    catches the exact-degenerate case (two of the three test vertices
- *    coincide) where the winding cross-product's own ratio becomes
- *    ill-conditioned, not just noisy.
- *  - The angle between those edges must not be too close to parallel --
- *    a scale-invariant check (compares r^2, twice the signed area
- *    squared, against a margin scaled by the edges' own squared lengths
- *    -- equivalent to requiring |sin(angle between edges)| above a
- *    threshold, regardless of the triangle's absolute size) that catches
- *    thin-but-non-degenerate triangles the edge-length check alone
- *    wouldn't.
- *
- * Whenever EITHER check fails, this returns GL_TRUE (keep, don't cull) --
- * identical to not having culled that primitive at all, so the GPU's own
- * hardware backface-cull (configured on every draw, gl_EmitCullBlendState)
- * still makes the final, reliable decision for it. Both margins below are
- * deliberately conservative, biased toward "not confident, don't cull".
- */
-#define CULL_MIN_EDGE_LENSQ (1e-4f)
-#define CULL_MIN_SIN_THETA (0.1f)
-static GLboolean d_ConservativeDecideFrontface(GLcontext context, MGLVertex *a, MGLVertex *b, MGLVertex *c)
-{
-	float a1, a2, b1, b2, r;
-	float aw, bw, cw;
-	float lenA_sq, lenB_sq;
-
-	aw = 1.0f / a->bw;
-	bw = 1.0f / b->bw;
-	cw = 1.0f / c->bw;
-
-	a1 = a->bx*aw - b->bx*bw;
-	a2 = a->by*aw - b->by*bw;
-	b1 = c->bx*cw - b->bx*bw;
-	b2 = c->by*cw - b->by*bw;
-
-	lenA_sq = a1*a1 + a2*a2;
-	lenB_sq = b1*b1 + b2*b2;
-
-	if (lenA_sq < CULL_MIN_EDGE_LENSQ || lenB_sq < CULL_MIN_EDGE_LENSQ)
-	{
-		return GL_TRUE; /* an edge is too short to trust -- keep, let hardware decide */
-	}
-
-	r = a1*b2 - a2*b1;
-
-	if (r*r < CULL_MIN_SIN_THETA * CULL_MIN_SIN_THETA * lenA_sq * lenB_sq)
-	{
-		return GL_TRUE; /* too close to parallel/degenerate -- keep, let hardware decide */
-	}
-
-	if ((r < 0.0f && context->CurrentCullSign < 0) ||
-	    (r > 0.0f && context->CurrentCullSign > 0))
-	{
-		return GL_FALSE; /* confidently back-facing */
-	}
-	return GL_TRUE;
-}
-
-/* PoC/v3d_assembler.c:41-49, duplicated per this file's own header comment */
+/* From an earlier library by the same author, duplicated per this file's own
+ * header comment */
 static v3d_u64 byteswap64(v3d_u64 x)
 {
 	v3d_u64 hi_lo_swapped = (x << 32) | (x >> 32);
@@ -222,8 +155,8 @@ typedef struct v3d_my_uniforms
 	 * other that does not want them) simply never reads these two, while the
 	 * six render-pass vertex shaders that DO read them find them exactly
 	 * where their two trailing ldunifrf reads expect. That asymmetry is the
-	 * whole reason these go last rather than next to scale_p_y, which was
-	 * inserted mid-stream because every shader wanted it. */
+	 * whole reason these go last rather than next to scale_p_y, which sits
+	 * mid-stream because every shader reads it. */
 	float z_scale, z_offset;
 } v3d_my_uniforms;
 
@@ -240,7 +173,18 @@ void d_DrawQuads         (GLcontext);
 void d_DrawQuadStrip     (GLcontext);
 void d_DrawTrianglesVA   (GLcontext);
 void d_DrawFlat	         (GLcontext);
+void d_DrawWireframe     (GLcontext, int);   /* glPolygonMode GL_LINE/GL_POINT */
+static void d_DrawWireframeLocked(GLcontext, int, GLenum, const GLvoid *, int);
 
+/*
+ * glPolygonMode, tested at the top of each polygon d_Draw*. Both faces must
+ * agree: there is one decomposition, and a front mode differing from the back
+ * would need the geometry emitted twice with complementary cull state. MESA
+ * does not support that either on this hardware, and warns; here a mix simply
+ * stays filled rather than being half-applied.
+ */
+#define WIREFRAME_WANTED(c) \
+	((c)->CurPolygonMode != GL_FILL && (c)->CurPolygonMode == (c)->CurPolygonModeBack)
 /* d_DrawMtexPoly/d_DrawSmoothPoly/d_DrawNormalPoly (the original's own
  * GL_POLYGON dispatch, chosen by smooth/texture state at glBegin time) are
  * not ported -- GL_POLYGON reuses d_DrawTriangleFan directly instead
@@ -499,9 +443,9 @@ INLINE void PrepTexCoords(GLcontext context, int start, const int numverts, GLbo
  * gl_EmitPrimitiveV3DEx, so the function's prologue saves and restores SIX
  * floating-point registers instead of three, on EVERY draw call, whether or not
  * any texture matrix is ever set. volatile forces them to stay in memory: the
- * prologue goes back to exactly what it was before this feature existed, and the
- * only thing it costs is a reload per use on the rare path where a texture matrix
- * really is active.
+ * prologue is exactly what it would be without this feature, and the only thing
+ * it costs is a reload per use on the rare path where a texture matrix really is
+ * active.
  *
  * Filling the struct only on the active path, WITHOUT volatile, is the trap: a
  * conditionally defined struct wrecks GCC's register allocation and costs far
@@ -686,243 +630,129 @@ void FreeMtex(void)
 /* Lazily assembles and uploads every shader variant's machine code, once
  * per context lifetime (backend->shaders_ready) -- a context that only ever
  * calls GLClear never needs this, so it doesn't belong in v3d_context_init.
- * The code memory is one allocation of fixed 1024-byte slots, one slot per
- * variant, in the order the offsets below give. Adding a variant means
- * editing the slot count here as well: see v3d_shader_assembler.h's own
- * enum comment for the full lockstep list. */
+ * The code memory is ONE PACKED allocation, sized from the variants' real
+ * sizes, in the order the offsets below give -- no fixed slot stride. Adding a
+ * variant needs no edit here; see v3d_shader_assembler.h's enum comment for
+ * what it does need. */
+/*
+ * Where each shader variant's code sits, as a byte offset into
+ * shader_code_mem. Filled by gl_EnsureShaders and read by every draw-time
+ * selector, so the upload and the selection cannot disagree about an address.
+ * The layout is identical for every context -- same shaders, same sizes -- so
+ * one table serves them all.
+ */
+/*
+ * SHADER ORDER. The shaders are laid end to end in this order and
+ * g_shader_offset[n] is the running sum of the sizes before shader n, so
+ * g_shader_offset[0] = 0, [1] = size of shader 0, [2] = [1] + size of shader 1.
+ * The selectors below pick a shader by this index, so the address is one
+ * table read and no shift.
+ */
+static const UBYTE g_shader_variant[V3D_MAX_SHADER_VARIANTS] =
+{
+	V3D_SHADER_VARIANT_VERTEX_TEXTURED,                        /*   0 */
+	V3D_SHADER_VARIANT_COORDINATE_TEXTURED,                    /*   1 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED,                    /*   2 */
+	V3D_SHADER_VARIANT_VERTEX_SMOOTH,                          /*   3 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH,             /*   4 */
+	V3D_SHADER_VARIANT_VERTEX_SMOOTH_TEXTURED,                 /*   5 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH,               /*   6 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG,                /*   7 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST,          /*   8 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG,                  /*   9 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST,            /*  10 */
+	V3D_SHADER_VARIANT_VERTEX_MULTITEXTURE,                    /*  11 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE,                  /*  12 */
+	V3D_SHADER_VARIANT_COORDINATE_CLIPSPACE,                   /*  13 */
+	V3D_SHADER_VARIANT_VERTEX_SMOOTH_TEXTURED_CLIPSPACE,       /*  14 */
+	V3D_SHADER_VARIANT_VERTEX_MULTITEXTURE_CLIPSPACE,          /*  15 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL,            /*  16 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE,          /*  17 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_GREATER,  /*  18 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_GREATER,    /*  19 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD,             /*  20 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_GREATER, /*  21 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST,     /*  22 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_NEVER,    /*  23 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_NEVER,      /*  24 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_NEVER, /*  25 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_LESS,     /*  26 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_LESS,       /*  27 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_LESS, /*  28 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_EQUAL,    /*  29 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_EQUAL,      /*  30 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_EQUAL, /*  31 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_LEQUAL,   /*  32 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_LEQUAL,     /*  33 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_LEQUAL, /*  34 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_NOTEQUAL, /*  35 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_NOTEQUAL,   /*  36 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_NOTEQUAL, /*  37 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST,      /*  38 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST,        /*  39 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_GREATER, /*  40 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_GREATER, /*  41 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_LESS, /*  42 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_LESS,   /*  43 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_EQUAL, /*  44 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_EQUAL,  /*  45 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_LEQUAL, /*  46 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_LEQUAL, /*  47 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_NOTEQUAL, /*  48 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_NOTEQUAL, /*  49 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_NEVER, /*  50 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_NEVER,  /*  51 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG,         /*  52 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG,           /*  53 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST, /*  54 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_GREATER, /*  55 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_LESS, /*  56 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_EQUAL, /*  57 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_LEQUAL, /*  58 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_NOTEQUAL, /*  59 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_NEVER, /*  60 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_FOG,              /*  61 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_FOG,        /*  62 */
+	V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_FOG,      /*  63 */
+	V3D_SHADER_VARIANT_VERTEX_LIT,                             /*  64 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED,                    /*  65 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_POINT_SMOOTH,       /*  66 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_POINT_SMOOTH, /*  67 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_POINT_SMOOTH,         /*  68 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_POINT_SMOOTH,  /*  69 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST,  /*  70 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_GREATER,  /*  71 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LESS,  /*  72 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_EQUAL,  /*  73 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_LEQUAL,  /*  74 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NOTEQUAL,  /*  75 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_ALPHATEST_NEVER,  /*  76 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST,  /*  77 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_GREATER,  /*  78 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LESS,  /*  79 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_EQUAL,  /*  80 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_LEQUAL,  /*  81 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NOTEQUAL,  /*  82 */
+	V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG_ALPHATEST_NEVER,  /*  83 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_REALW,                        /*  84 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE,                 /*  85 */
+	V3D_SHADER_VARIANT_FRAGMENT_LIT_MULTITEXTURE,               /*  86 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_COLORMATERIAL,                  /*  87 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_TEXTURED_COLORMATERIAL,         /*  88 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_REALW_COLORMATERIAL,            /*  89 */
+	V3D_SHADER_VARIANT_VERTEX_LIT_MULTITEXTURE_COLORMATERIAL,     /*  90 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVADD,         /*  91 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD_ENVBLEND,       /*  92 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVADD,           /*  93 */
+	V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ENVBLEND,         /*  94 */
+};
+
+static ULONG g_shader_offset[V3D_MAX_SHADER_VARIANTS];   /* byte offset of each shader */
+
 static int gl_EnsureShaders(GLcontext context)
 {
 	V3DContext* backend = &context->backend;
-	v3d_u64* shader_vex;
-	v3d_u64* shader_coord;
-	v3d_u64* shader_frag;
-	v3d_u64* shader_frag_textured;
-	v3d_u64* shader_vex_smooth;
-	v3d_u64* shader_frag_smooth;
-	v3d_u64* shader_vex_smooth_textured;
-	v3d_u64* shader_frag_textured_smooth;
-	v3d_u64* shader_frag_untextured_fog;
-	v3d_u64* shader_frag_untextured_alphatest;
-	v3d_u64* shader_frag_textured_fog;
-	v3d_u64* shader_frag_textured_alphatest;
-	v3d_u64* shader_vex_multitexture;
-	v3d_u64* shader_frag_multitexture;
-	v3d_u64* shader_frag_untextured_blend;
-	v3d_u64* shader_frag_untextured_blend_add;
-	v3d_u64* shader_frag_untextured_smooth_blend_add;
-	v3d_u64* shader_frag_untextured_smooth_blend;
-	v3d_u64* shader_frag_textured_blend;
-	v3d_u64* shader_frag_textured_smooth_blend;
-	v3d_u64* shader_frag_textured_padded_flat_test;
-	v3d_u64* shader_coord_clipspace;
-	v3d_u64* shader_vex_smooth_textured_clipspace;
-	v3d_u64* shader_vex_multitexture_clipspace;
-	v3d_u64* shader_frag_multitexture_decal;
-	v3d_u64* shader_frag_multitexture_replace;
-	v3d_u64* shader_frag_multitexture_modulate_blend;
-	v3d_u64* shader_frag_multitexture_decal_blend;
-	v3d_u64* shader_frag_multitexture_replace_blend;
-	v3d_u64* shader_frag_untextured_alphatest_greater;
-	v3d_u64* shader_frag_textured_alphatest_greater;
-	v3d_u64* shader_frag_textured_smooth_alphatest_greater;
-	v3d_u64* shader_frag_textured_smooth_alphatest;
-	v3d_u64* shader_frag_multitexture_modulate_translucent;
-	v3d_u64* shader_frag_textured_colormod;
-	v3d_u64* shader_frag_textured_smooth_blend_add;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_zero;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_one;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_srccolor;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_invdstalpha;
-	v3d_u64* shader_frag_textured_smooth_zero_invsrccolor;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_srcalpha;
-	v3d_u64* shader_frag_textured_smooth_one_invsrcalpha;
-	v3d_u64* shader_frag_textured_smooth_invsrcalpha_srcalpha;
-	v3d_u64* shader_frag_untextured_blend_srcalpha_one;
-	v3d_u64* shader_frag_untextured_smooth_blend_srcalpha_one;
-	v3d_u64* shader_frag_textured_smooth_blend_srcalpha_one;
-	/* The remaining alpha_func variants: 5 funcs x 3 shapes. */
-	v3d_u64* shader_frag_untextured_alphatest_never;
-	v3d_u64* shader_frag_textured_alphatest_never;
-	v3d_u64* shader_frag_textured_smooth_alphatest_never;
-	v3d_u64* shader_frag_untextured_alphatest_less;
-	v3d_u64* shader_frag_textured_alphatest_less;
-	v3d_u64* shader_frag_textured_smooth_alphatest_less;
-	v3d_u64* shader_frag_untextured_alphatest_equal;
-	v3d_u64* shader_frag_textured_alphatest_equal;
-	v3d_u64* shader_frag_textured_smooth_alphatest_equal;
-	v3d_u64* shader_frag_untextured_alphatest_lequal;
-	v3d_u64* shader_frag_textured_alphatest_lequal;
-	v3d_u64* shader_frag_textured_smooth_alphatest_lequal;
-	v3d_u64* shader_frag_untextured_alphatest_notequal;
-	v3d_u64* shader_frag_textured_alphatest_notequal;
-	v3d_u64* shader_frag_textured_smooth_alphatest_notequal;
-	v3d_u64* shader_frag_untextured_fog_alphatest;
-	v3d_u64* shader_frag_textured_fog_alphatest;
-	v3d_u64* shader_frag_untextured_fog_alphatest_greater;
-	v3d_u64* shader_frag_textured_fog_alphatest_greater;
-	v3d_u64* shader_frag_untextured_fog_alphatest_less;
-	v3d_u64* shader_frag_textured_fog_alphatest_less;
-	v3d_u64* shader_frag_untextured_fog_alphatest_equal;
-	v3d_u64* shader_frag_textured_fog_alphatest_equal;
-	v3d_u64* shader_frag_untextured_fog_alphatest_lequal;
-	v3d_u64* shader_frag_textured_fog_alphatest_lequal;
-	v3d_u64* shader_frag_untextured_fog_alphatest_notequal;
-	v3d_u64* shader_frag_textured_fog_alphatest_notequal;
-	v3d_u64* shader_frag_untextured_fog_alphatest_never;
-	v3d_u64* shader_frag_textured_fog_alphatest_never;
-	v3d_u64* shader_frag_untextured_smooth_fog;
-	v3d_u64* shader_frag_textured_smooth_fog;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_greater;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_less;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_equal;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_lequal;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_notequal;
-	v3d_u64* shader_frag_textured_smooth_fog_alphatest_never;
-	v3d_u64* shader_frag_multitexture_fog;
-	v3d_u64* shader_frag_multitexture_decal_fog;
-	v3d_u64* shader_frag_multitexture_replace_fog;
-	v3d_u64* shader_frag_textured_blend_fog;
-	v3d_u64* shader_frag_textured_smooth_blend_fog;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_zero_fog;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_one_fog;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_srccolor_fog;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_invdstalpha_fog;
-	v3d_u64* shader_frag_textured_smooth_zero_invsrccolor_fog;
-	v3d_u64* shader_frag_textured_smooth_dstcolor_srcalpha_fog;
-	v3d_u64* shader_frag_textured_smooth_one_invsrcalpha_fog;
-	v3d_u64* shader_frag_textured_smooth_invsrcalpha_srcalpha_fog;
-	v3d_u64* shader_frag_multitexture_modulate_translucent_fog;
-	v3d_u64* shader_frag_multitexture_modulate_blend_fog;
-	v3d_u64* shader_frag_multitexture_decal_blend_fog;
-	v3d_u64* shader_frag_multitexture_replace_blend_fog;
-	v3d_u64* shader_frag_untextured_smooth_blend_fog;
-	v3d_u64* shader_frag_untextured_smooth_blend_add_fog;
-	v3d_u64* shader_frag_untextured_smooth_blend_srcalpha_one_fog;
-	v3d_u64* shader_frag_textured_smooth_blend_add_fog;
-	v3d_u64* shader_frag_textured_smooth_blend_srcalpha_one_fog;
-	v3d_u64* shader_frag_untextured_blend_fog;
-	v3d_u64* shader_frag_untextured_blend_add_fog;
-	v3d_u64* shader_frag_untextured_blend_srcalpha_one_fog;
-	v3d_u64* shader_frag_untextured_point_smooth;
-	v3d_u64* shader_frag_untextured_smooth_point_smooth;
-	v3d_u64* shader_frag_textured_point_smooth;
-	v3d_u64* shader_frag_textured_smooth_point_smooth;
-	V3DAssembledShader* vex;
-	V3DAssembledShader* coord;
-	V3DAssembledShader* frag;
-	V3DAssembledShader* frag_textured;
-	V3DAssembledShader* vex_smooth;
-	V3DAssembledShader* frag_smooth;
-	V3DAssembledShader* vex_smooth_textured;
-	V3DAssembledShader* frag_textured_smooth;
-	V3DAssembledShader* frag_untextured_fog;
-	V3DAssembledShader* frag_untextured_alphatest;
-	V3DAssembledShader* frag_textured_fog;
-	V3DAssembledShader* frag_textured_alphatest;
-	V3DAssembledShader* vex_multitexture;
-	V3DAssembledShader* frag_multitexture;
-	V3DAssembledShader* frag_untextured_blend;
-	V3DAssembledShader* frag_untextured_blend_add;
-	V3DAssembledShader* frag_untextured_smooth_blend_add;
-	V3DAssembledShader* frag_untextured_smooth_blend;
-	V3DAssembledShader* frag_textured_blend;
-	V3DAssembledShader* frag_textured_smooth_blend;
-	V3DAssembledShader* frag_textured_padded_flat_test;
-	V3DAssembledShader* coord_clipspace;
-	V3DAssembledShader* vex_smooth_textured_clipspace;
-	V3DAssembledShader* vex_multitexture_clipspace;
-	V3DAssembledShader* frag_multitexture_decal;
-	V3DAssembledShader* frag_multitexture_replace;
-	V3DAssembledShader* frag_multitexture_modulate_blend;
-	V3DAssembledShader* frag_multitexture_decal_blend;
-	V3DAssembledShader* frag_multitexture_replace_blend;
-	V3DAssembledShader* frag_untextured_alphatest_greater;
-	V3DAssembledShader* frag_textured_alphatest_greater;
-	V3DAssembledShader* frag_textured_smooth_alphatest_greater;
-	V3DAssembledShader* frag_textured_smooth_alphatest;
-	V3DAssembledShader* frag_multitexture_modulate_translucent;
-	V3DAssembledShader* frag_textured_colormod;
-	V3DAssembledShader* frag_textured_smooth_blend_add;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_zero;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_one;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_srccolor;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_invdstalpha;
-	V3DAssembledShader* frag_textured_smooth_zero_invsrccolor;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_srcalpha;
-	V3DAssembledShader* frag_textured_smooth_one_invsrcalpha;
-	V3DAssembledShader* frag_textured_smooth_invsrcalpha_srcalpha;
-	V3DAssembledShader* frag_untextured_blend_srcalpha_one;
-	V3DAssembledShader* frag_untextured_smooth_blend_srcalpha_one;
-	V3DAssembledShader* frag_textured_smooth_blend_srcalpha_one;
-	/* The remaining alpha_func variants: 5 funcs x 3 shapes. */
-	V3DAssembledShader* frag_untextured_alphatest_never;
-	V3DAssembledShader* frag_textured_alphatest_never;
-	V3DAssembledShader* frag_textured_smooth_alphatest_never;
-	V3DAssembledShader* frag_untextured_alphatest_less;
-	V3DAssembledShader* frag_textured_alphatest_less;
-	V3DAssembledShader* frag_textured_smooth_alphatest_less;
-	V3DAssembledShader* frag_untextured_alphatest_equal;
-	V3DAssembledShader* frag_textured_alphatest_equal;
-	V3DAssembledShader* frag_textured_smooth_alphatest_equal;
-	V3DAssembledShader* frag_untextured_alphatest_lequal;
-	V3DAssembledShader* frag_textured_alphatest_lequal;
-	V3DAssembledShader* frag_textured_smooth_alphatest_lequal;
-	V3DAssembledShader* frag_untextured_alphatest_notequal;
-	V3DAssembledShader* frag_textured_alphatest_notequal;
-	V3DAssembledShader* frag_textured_smooth_alphatest_notequal;
-	V3DAssembledShader* frag_untextured_fog_alphatest;
-	V3DAssembledShader* frag_textured_fog_alphatest;
-	V3DAssembledShader* frag_untextured_fog_alphatest_greater;
-	V3DAssembledShader* frag_textured_fog_alphatest_greater;
-	V3DAssembledShader* frag_untextured_fog_alphatest_less;
-	V3DAssembledShader* frag_textured_fog_alphatest_less;
-	V3DAssembledShader* frag_untextured_fog_alphatest_equal;
-	V3DAssembledShader* frag_textured_fog_alphatest_equal;
-	V3DAssembledShader* frag_untextured_fog_alphatest_lequal;
-	V3DAssembledShader* frag_textured_fog_alphatest_lequal;
-	V3DAssembledShader* frag_untextured_fog_alphatest_notequal;
-	V3DAssembledShader* frag_textured_fog_alphatest_notequal;
-	V3DAssembledShader* frag_untextured_fog_alphatest_never;
-	V3DAssembledShader* frag_textured_fog_alphatest_never;
-	V3DAssembledShader* frag_untextured_smooth_fog;
-	V3DAssembledShader* frag_textured_smooth_fog;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_greater;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_less;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_equal;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_lequal;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_notequal;
-	V3DAssembledShader* frag_textured_smooth_fog_alphatest_never;
-	V3DAssembledShader* frag_multitexture_fog;
-	V3DAssembledShader* frag_multitexture_decal_fog;
-	V3DAssembledShader* frag_multitexture_replace_fog;
-	V3DAssembledShader* frag_textured_blend_fog;
-	V3DAssembledShader* frag_textured_smooth_blend_fog;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_zero_fog;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_one_fog;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_srccolor_fog;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_invdstalpha_fog;
-	V3DAssembledShader* frag_textured_smooth_zero_invsrccolor_fog;
-	V3DAssembledShader* frag_textured_smooth_dstcolor_srcalpha_fog;
-	V3DAssembledShader* frag_textured_smooth_one_invsrcalpha_fog;
-	V3DAssembledShader* frag_textured_smooth_invsrcalpha_srcalpha_fog;
-	V3DAssembledShader* frag_multitexture_modulate_translucent_fog;
-	V3DAssembledShader* frag_multitexture_modulate_blend_fog;
-	V3DAssembledShader* frag_multitexture_decal_blend_fog;
-	V3DAssembledShader* frag_multitexture_replace_blend_fog;
-	V3DAssembledShader* frag_untextured_smooth_blend_fog;
-	V3DAssembledShader* frag_untextured_smooth_blend_add_fog;
-	V3DAssembledShader* frag_untextured_smooth_blend_srcalpha_one_fog;
-	V3DAssembledShader* frag_textured_smooth_blend_add_fog;
-	V3DAssembledShader* frag_textured_smooth_blend_srcalpha_one_fog;
-	V3DAssembledShader* frag_untextured_blend_fog;
-	V3DAssembledShader* frag_untextured_blend_add_fog;
-	V3DAssembledShader* frag_untextured_blend_srcalpha_one_fog;
-	V3DAssembledShader* frag_untextured_point_smooth;
-	V3DAssembledShader* frag_untextured_smooth_point_smooth;
-	V3DAssembledShader* frag_textured_point_smooth;
-	V3DAssembledShader* frag_textured_smooth_point_smooth;
+	ULONG total = 0;
 	int i;
 
 	if (backend->shaders_ready)
@@ -936,508 +766,40 @@ static int gl_EnsureShaders(GLcontext context)
 		return -1;
 	}
 
-	/* Every variant stays resident, so gl_EmitPrimitiveV3D can pick which
-	 * vertex+fragment pair to point the shader state record at per draw
-	 * call. The buffer is exactly full: the last slot ends precisely at the
-	 * end of the allocation, so a new variant without a bump here writes
-	 * past the end of shader_code_mem, over whatever V3D memory follows. */
-	if (v3d_mem_alloc(&context->device, &backend->shader_code_mem, 114 * 1024) < 0)
+	/*
+	 * THE LAYOUT IS COMPUTED, NOT LITERAL. The shaders are laid end to end and
+	 * each one's offset is recorded in g_shader_offset, which BOTH this upload
+	 * and every selector read. They cannot disagree: there is one number per
+	 * shader, not two literals that have to be kept equal by hand. Nothing
+	 * imposes a per-shader stride, so nothing caps a shader's length below the
+	 * host capacity, and the allocation is exactly what the code needs.
+	 *
+	 * Alignment comes free: the shader record holds the address >> 3, and every
+	 * offset here is a sum of whole 8-byte instructions.
+	 */
+	for (i = 0; i < V3D_MAX_SHADER_VARIANTS; i++)
 	{
-		D(("gl_EnsureShaders: v3d_mem_alloc failed\n"));
+		g_shader_offset[i] = total;
+		total += (ULONG)v3d_shader_variants[g_shader_variant[i]].numInstructions * 8;
+	}
+
+	if (v3d_mem_alloc(&context->device, &backend->shader_code_mem, total) < 0)
+	{
+		D(("gl_EnsureShaders: v3d_mem_alloc failed for %ld bytes\n", (LONG)total));
 		return -2;
 	}
 	/* No explicit memset here -- v3d_mem_alloc's own AllocVec call already
 	 * uses MEMF_CLEAR, so this memory arrives pre-zeroed. */
 
-	shader_vex                       = (v3d_u64*)backend->shader_code_mem.hostptr;
-	shader_coord                     = (v3d_u64*)((ULONG)shader_vex + 1024);
-	shader_frag                      = (v3d_u64*)((ULONG)shader_vex + 2048);
-	shader_frag_textured             = (v3d_u64*)((ULONG)shader_vex + 3072);
-	shader_vex_smooth                = (v3d_u64*)((ULONG)shader_vex + 4096);
-	shader_frag_smooth               = (v3d_u64*)((ULONG)shader_vex + 5120);
-	shader_vex_smooth_textured       = (v3d_u64*)((ULONG)shader_vex + 6144);
-	shader_frag_textured_smooth      = (v3d_u64*)((ULONG)shader_vex + 7168);
-	shader_frag_untextured_fog       = (v3d_u64*)((ULONG)shader_vex + 8192);
-	shader_frag_untextured_alphatest = (v3d_u64*)((ULONG)shader_vex + 9216);
-	shader_frag_textured_fog         = (v3d_u64*)((ULONG)shader_vex + 10240);
-	shader_frag_textured_alphatest   = (v3d_u64*)((ULONG)shader_vex + 11264);
-	shader_vex_multitexture          = (v3d_u64*)((ULONG)shader_vex + 12288);
-	shader_frag_multitexture         = (v3d_u64*)((ULONG)shader_vex + 13312);
-	shader_frag_untextured_blend     = (v3d_u64*)((ULONG)shader_vex + 14336);
-	shader_coord_clipspace                = (v3d_u64*)((ULONG)shader_vex + 15360);
-	shader_vex_smooth_textured_clipspace  = (v3d_u64*)((ULONG)shader_vex + 16384);
-	shader_vex_multitexture_clipspace     = (v3d_u64*)((ULONG)shader_vex + 17408);
-	shader_frag_multitexture_decal           = (v3d_u64*)((ULONG)shader_vex + 18432);
-	shader_frag_multitexture_replace         = (v3d_u64*)((ULONG)shader_vex + 19456);
-	shader_frag_multitexture_modulate_blend  = (v3d_u64*)((ULONG)shader_vex + 20480);
-	shader_frag_multitexture_decal_blend     = (v3d_u64*)((ULONG)shader_vex + 21504);
-	shader_frag_multitexture_replace_blend   = (v3d_u64*)((ULONG)shader_vex + 22528);
-	shader_frag_untextured_alphatest_greater = (v3d_u64*)((ULONG)shader_vex + 23552);
-	shader_frag_textured_alphatest_greater   = (v3d_u64*)((ULONG)shader_vex + 24576);
-	shader_frag_textured_smooth_alphatest_greater = (v3d_u64*)((ULONG)shader_vex + 43008);
-	shader_frag_textured_smooth_alphatest = (v3d_u64*)((ULONG)shader_vex + 44032);
-	shader_frag_untextured_blend_add         = (v3d_u64*)((ULONG)shader_vex + 25600);
-	shader_frag_untextured_smooth_blend_add  = (v3d_u64*)((ULONG)shader_vex + 26624);
-	shader_frag_untextured_smooth_blend      = (v3d_u64*)((ULONG)shader_vex + 27648);
-	shader_frag_textured_blend               = (v3d_u64*)((ULONG)shader_vex + 28672);
-	shader_frag_textured_smooth_blend        = (v3d_u64*)((ULONG)shader_vex + 29696);
-	shader_frag_textured_padded_flat_test    = (v3d_u64*)((ULONG)shader_vex + 30720);
-	shader_frag_multitexture_modulate_translucent = (v3d_u64*)((ULONG)shader_vex + 31744);
-	shader_frag_textured_colormod                 = (v3d_u64*)((ULONG)shader_vex + 32768);
-	shader_frag_textured_smooth_blend_add         = (v3d_u64*)((ULONG)shader_vex + 33792);
-	shader_frag_textured_smooth_dstcolor_zero         = (v3d_u64*)((ULONG)shader_vex + 34816);
-	shader_frag_textured_smooth_dstcolor_one          = (v3d_u64*)((ULONG)shader_vex + 35840);
-	shader_frag_textured_smooth_dstcolor_srccolor     = (v3d_u64*)((ULONG)shader_vex + 36864);
-	shader_frag_textured_smooth_dstcolor_invdstalpha  = (v3d_u64*)((ULONG)shader_vex + 37888);
-	shader_frag_textured_smooth_zero_invsrccolor      = (v3d_u64*)((ULONG)shader_vex + 38912);
-	shader_frag_textured_smooth_dstcolor_srcalpha     = (v3d_u64*)((ULONG)shader_vex + 39936);
-	shader_frag_textured_smooth_one_invsrcalpha       = (v3d_u64*)((ULONG)shader_vex + 40960);
-	shader_frag_textured_smooth_invsrcalpha_srcalpha  = (v3d_u64*)((ULONG)shader_vex + 41984);
-	/* The SRC_ALPHA/ONE blend variants, slots 44..46. */
-	shader_frag_untextured_blend_srcalpha_one         = (v3d_u64*)((ULONG)shader_vex + 45056);
-	shader_frag_untextured_smooth_blend_srcalpha_one  = (v3d_u64*)((ULONG)shader_vex + 46080);
-	shader_frag_textured_smooth_blend_srcalpha_one    = (v3d_u64*)((ULONG)shader_vex + 47104);
-	/* The remaining alpha_func variants: 15 slots, 47..61. */
-	shader_frag_untextured_alphatest_never            = (v3d_u64*)((ULONG)shader_vex + 48128);
-	shader_frag_textured_alphatest_never              = (v3d_u64*)((ULONG)shader_vex + 49152);
-	shader_frag_textured_smooth_alphatest_never       = (v3d_u64*)((ULONG)shader_vex + 50176);
-	shader_frag_untextured_alphatest_less             = (v3d_u64*)((ULONG)shader_vex + 51200);
-	shader_frag_textured_alphatest_less               = (v3d_u64*)((ULONG)shader_vex + 52224);
-	shader_frag_textured_smooth_alphatest_less        = (v3d_u64*)((ULONG)shader_vex + 53248);
-	shader_frag_untextured_alphatest_equal            = (v3d_u64*)((ULONG)shader_vex + 54272);
-	shader_frag_textured_alphatest_equal              = (v3d_u64*)((ULONG)shader_vex + 55296);
-	shader_frag_textured_smooth_alphatest_equal       = (v3d_u64*)((ULONG)shader_vex + 56320);
-	shader_frag_untextured_alphatest_lequal           = (v3d_u64*)((ULONG)shader_vex + 57344);
-	shader_frag_textured_alphatest_lequal             = (v3d_u64*)((ULONG)shader_vex + 58368);
-	shader_frag_textured_smooth_alphatest_lequal      = (v3d_u64*)((ULONG)shader_vex + 59392);
-	shader_frag_untextured_alphatest_notequal         = (v3d_u64*)((ULONG)shader_vex + 60416);
-	shader_frag_textured_alphatest_notequal           = (v3d_u64*)((ULONG)shader_vex + 61440);
-	shader_frag_textured_smooth_alphatest_notequal    = (v3d_u64*)((ULONG)shader_vex + 62464);
-	/* Combined fog + alpha test, slots 62..75 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	shader_frag_untextured_fog_alphatest = (v3d_u64*)((ULONG)shader_vex + 63488);
-	shader_frag_textured_fog_alphatest = (v3d_u64*)((ULONG)shader_vex + 64512);
-	shader_frag_untextured_fog_alphatest_greater = (v3d_u64*)((ULONG)shader_vex + 65536);
-	shader_frag_textured_fog_alphatest_greater = (v3d_u64*)((ULONG)shader_vex + 66560);
-	shader_frag_untextured_fog_alphatest_less = (v3d_u64*)((ULONG)shader_vex + 67584);
-	shader_frag_textured_fog_alphatest_less = (v3d_u64*)((ULONG)shader_vex + 68608);
-	shader_frag_untextured_fog_alphatest_equal = (v3d_u64*)((ULONG)shader_vex + 69632);
-	shader_frag_textured_fog_alphatest_equal = (v3d_u64*)((ULONG)shader_vex + 70656);
-	shader_frag_untextured_fog_alphatest_lequal = (v3d_u64*)((ULONG)shader_vex + 71680);
-	shader_frag_textured_fog_alphatest_lequal = (v3d_u64*)((ULONG)shader_vex + 72704);
-	shader_frag_untextured_fog_alphatest_notequal = (v3d_u64*)((ULONG)shader_vex + 73728);
-	shader_frag_textured_fog_alphatest_notequal = (v3d_u64*)((ULONG)shader_vex + 74752);
-	shader_frag_untextured_fog_alphatest_never = (v3d_u64*)((ULONG)shader_vex + 75776);
-	shader_frag_textured_fog_alphatest_never = (v3d_u64*)((ULONG)shader_vex + 76800);
-	/* Smooth fog, slots 76..84 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	shader_frag_untextured_smooth_fog = (v3d_u64*)((ULONG)shader_vex + 77824);
-	shader_frag_textured_smooth_fog = (v3d_u64*)((ULONG)shader_vex + 78848);
-	shader_frag_textured_smooth_fog_alphatest = (v3d_u64*)((ULONG)shader_vex + 79872);
-	shader_frag_textured_smooth_fog_alphatest_greater = (v3d_u64*)((ULONG)shader_vex + 80896);
-	shader_frag_textured_smooth_fog_alphatest_less = (v3d_u64*)((ULONG)shader_vex + 81920);
-	shader_frag_textured_smooth_fog_alphatest_equal = (v3d_u64*)((ULONG)shader_vex + 82944);
-	shader_frag_textured_smooth_fog_alphatest_lequal = (v3d_u64*)((ULONG)shader_vex + 83968);
-	shader_frag_textured_smooth_fog_alphatest_notequal = (v3d_u64*)((ULONG)shader_vex + 84992);
-	shader_frag_textured_smooth_fog_alphatest_never = (v3d_u64*)((ULONG)shader_vex + 86016);
-	/* Multitexture fog, slots 85..87. */
-	shader_frag_multitexture_fog = (v3d_u64*)((ULONG)shader_vex + 87040);
-	shader_frag_multitexture_decal_fog = (v3d_u64*)((ULONG)shader_vex + 88064);
-	shader_frag_multitexture_replace_fog = (v3d_u64*)((ULONG)shader_vex + 89088);
-	/* Software-blend fog, slots 88..101. */
-	shader_frag_textured_blend_fog = (v3d_u64*)((ULONG)shader_vex + 90112);
-	shader_frag_textured_smooth_blend_fog = (v3d_u64*)((ULONG)shader_vex + 91136);
-	shader_frag_textured_smooth_dstcolor_zero_fog = (v3d_u64*)((ULONG)shader_vex + 92160);
-	shader_frag_textured_smooth_dstcolor_one_fog = (v3d_u64*)((ULONG)shader_vex + 93184);
-	shader_frag_textured_smooth_dstcolor_srccolor_fog = (v3d_u64*)((ULONG)shader_vex + 94208);
-	shader_frag_textured_smooth_dstcolor_invdstalpha_fog = (v3d_u64*)((ULONG)shader_vex + 95232);
-	shader_frag_textured_smooth_zero_invsrccolor_fog = (v3d_u64*)((ULONG)shader_vex + 96256);
-	shader_frag_textured_smooth_dstcolor_srcalpha_fog = (v3d_u64*)((ULONG)shader_vex + 97280);
-	shader_frag_textured_smooth_one_invsrcalpha_fog = (v3d_u64*)((ULONG)shader_vex + 98304);
-	shader_frag_textured_smooth_invsrcalpha_srcalpha_fog = (v3d_u64*)((ULONG)shader_vex + 99328);
-	shader_frag_multitexture_modulate_translucent_fog = (v3d_u64*)((ULONG)shader_vex + 100352);
-	shader_frag_multitexture_modulate_blend_fog = (v3d_u64*)((ULONG)shader_vex + 101376);
-	shader_frag_multitexture_decal_blend_fog = (v3d_u64*)((ULONG)shader_vex + 102400);
-	shader_frag_multitexture_replace_blend_fog = (v3d_u64*)((ULONG)shader_vex + 103424);
-	/* Register-constrained blend fog, slots 102..106. */
-	shader_frag_untextured_smooth_blend_fog = (v3d_u64*)((ULONG)shader_vex + 104448);
-	shader_frag_untextured_smooth_blend_add_fog = (v3d_u64*)((ULONG)shader_vex + 105472);
-	shader_frag_untextured_smooth_blend_srcalpha_one_fog = (v3d_u64*)((ULONG)shader_vex + 106496);
-	shader_frag_textured_smooth_blend_add_fog = (v3d_u64*)((ULONG)shader_vex + 107520);
-	shader_frag_textured_smooth_blend_srcalpha_one_fog = (v3d_u64*)((ULONG)shader_vex + 108544);
-	/* Untextured flat blend fog, slots 107..109. */
-	shader_frag_untextured_blend_fog = (v3d_u64*)((ULONG)shader_vex + 109568);
-	shader_frag_untextured_blend_add_fog = (v3d_u64*)((ULONG)shader_vex + 110592);
-	shader_frag_untextured_blend_srcalpha_one_fog = (v3d_u64*)((ULONG)shader_vex + 111616);
-	/* Smooth points, slots 110..113. */
-	shader_frag_untextured_point_smooth        = (v3d_u64*)((ULONG)shader_vex + 112640);
-	shader_frag_untextured_smooth_point_smooth = (v3d_u64*)((ULONG)shader_vex + 113664);
-	shader_frag_textured_point_smooth          = (v3d_u64*)((ULONG)shader_vex + 114688);
-	shader_frag_textured_smooth_point_smooth   = (v3d_u64*)((ULONG)shader_vex + 115712);
+	for (i = 0; i < V3D_MAX_SHADER_VARIANTS; i++)
+	{
+		const V3DAssembledShader* s = &v3d_shader_variants[g_shader_variant[i]];
+		v3d_u64* dst = (v3d_u64*)((ULONG)backend->shader_code_mem.hostptr + g_shader_offset[i]);
+		int k;
 
-	vex                       = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_TEXTURED];
-	coord                     = &v3d_shader_variants[V3D_SHADER_VARIANT_COORDINATE_TEXTURED];
-	frag                      = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED];
-	frag_textured             = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED];
-	vex_smooth                = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_SMOOTH];
-	frag_smooth               = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH];
-	vex_smooth_textured       = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_SMOOTH_TEXTURED];
-	frag_textured_smooth      = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH];
-	frag_untextured_fog       = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG];
-	frag_untextured_alphatest = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST];
-	frag_textured_fog         = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG];
-	frag_textured_alphatest   = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST];
-	vex_multitexture          = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_MULTITEXTURE];
-	frag_multitexture         = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE];
-	frag_untextured_blend     = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND];
-	frag_untextured_blend_add = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD];
-	frag_untextured_smooth_blend_add = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD];
-	frag_untextured_smooth_blend = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND];
-	frag_textured_blend = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND];
-	frag_textured_smooth_blend = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND];
-	frag_textured_padded_flat_test = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_PADDED_FLAT_TEST];
-	coord_clipspace                = &v3d_shader_variants[V3D_SHADER_VARIANT_COORDINATE_CLIPSPACE];
-	vex_smooth_textured_clipspace  = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_SMOOTH_TEXTURED_CLIPSPACE];
-	vex_multitexture_clipspace     = &v3d_shader_variants[V3D_SHADER_VARIANT_VERTEX_MULTITEXTURE_CLIPSPACE];
-	frag_multitexture_decal          = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL];
-	frag_multitexture_replace        = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE];
-	frag_multitexture_modulate_blend = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND];
-	frag_multitexture_decal_blend    = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND];
-	frag_multitexture_replace_blend  = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND];
-	frag_untextured_alphatest_greater = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_GREATER];
-	frag_textured_alphatest_greater   = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_GREATER];
-	frag_textured_smooth_alphatest_greater = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_GREATER];
-	frag_textured_smooth_alphatest = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST];
-	frag_multitexture_modulate_translucent = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT];
-	frag_textured_colormod = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_COLORMOD];
-	frag_textured_smooth_blend_add = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD];
-	frag_textured_smooth_dstcolor_zero = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO];
-	frag_textured_smooth_dstcolor_one = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE];
-	frag_textured_smooth_dstcolor_srccolor = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR];
-	frag_textured_smooth_dstcolor_invdstalpha = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA];
-	frag_textured_smooth_zero_invsrccolor = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR];
-	frag_textured_smooth_dstcolor_srcalpha = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA];
-	frag_textured_smooth_one_invsrcalpha = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA];
-	frag_textured_smooth_invsrcalpha_srcalpha = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA];
-	frag_untextured_blend_srcalpha_one = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE];
-	frag_untextured_smooth_blend_srcalpha_one = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE];
-	frag_textured_smooth_blend_srcalpha_one = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE];
-	/* The remaining alpha_func variants: 5 funcs x 3 shapes. */
-	frag_untextured_alphatest_never       = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_NEVER];
-	frag_textured_alphatest_never         = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_NEVER];
-	frag_textured_smooth_alphatest_never  = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_NEVER];
-	frag_untextured_alphatest_less        = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_LESS];
-	frag_textured_alphatest_less          = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_LESS];
-	frag_textured_smooth_alphatest_less   = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_LESS];
-	frag_untextured_alphatest_equal       = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_EQUAL];
-	frag_textured_alphatest_equal         = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_EQUAL];
-	frag_textured_smooth_alphatest_equal  = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_EQUAL];
-	frag_untextured_alphatest_lequal      = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_LEQUAL];
-	frag_textured_alphatest_lequal        = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_LEQUAL];
-	frag_textured_smooth_alphatest_lequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_LEQUAL];
-	frag_untextured_alphatest_notequal    = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_ALPHATEST_NOTEQUAL];
-	frag_textured_alphatest_notequal      = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_ALPHATEST_NOTEQUAL];
-	frag_textured_smooth_alphatest_notequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ALPHATEST_NOTEQUAL];
-	/* Combined fog + alpha test, slots 62..75 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	frag_untextured_fog_alphatest = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST];
-	frag_textured_fog_alphatest = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST];
-	frag_untextured_fog_alphatest_greater = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_GREATER];
-	frag_textured_fog_alphatest_greater = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_GREATER];
-	frag_untextured_fog_alphatest_less = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_LESS];
-	frag_textured_fog_alphatest_less = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_LESS];
-	frag_untextured_fog_alphatest_equal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_EQUAL];
-	frag_textured_fog_alphatest_equal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_EQUAL];
-	frag_untextured_fog_alphatest_lequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_LEQUAL];
-	frag_textured_fog_alphatest_lequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_LEQUAL];
-	frag_untextured_fog_alphatest_notequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_NOTEQUAL];
-	frag_textured_fog_alphatest_notequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_NOTEQUAL];
-	frag_untextured_fog_alphatest_never = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_FOG_ALPHATEST_NEVER];
-	frag_textured_fog_alphatest_never = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_FOG_ALPHATEST_NEVER];
-	/* Smooth fog, slots 76..84 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	frag_untextured_smooth_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_FOG];
-	frag_textured_smooth_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG];
-	frag_textured_smooth_fog_alphatest = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST];
-	frag_textured_smooth_fog_alphatest_greater = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_GREATER];
-	frag_textured_smooth_fog_alphatest_less = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_LESS];
-	frag_textured_smooth_fog_alphatest_equal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_EQUAL];
-	frag_textured_smooth_fog_alphatest_lequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_LEQUAL];
-	frag_textured_smooth_fog_alphatest_notequal = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_NOTEQUAL];
-	frag_textured_smooth_fog_alphatest_never = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST_NEVER];
-	/* Multitexture fog, slots 85..87. */
-	frag_multitexture_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_FOG];
-	frag_multitexture_decal_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_FOG];
-	frag_multitexture_replace_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_FOG];
-	/* Software-blend fog, slots 88..101. */
-	frag_textured_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_BLEND_FOG];
-	frag_textured_smooth_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_FOG];
-	frag_textured_smooth_dstcolor_zero_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ZERO_FOG];
-	frag_textured_smooth_dstcolor_one_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_ONE_FOG];
-	frag_textured_smooth_dstcolor_srccolor_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCCOLOR_FOG];
-	frag_textured_smooth_dstcolor_invdstalpha_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_INVDSTALPHA_FOG];
-	frag_textured_smooth_zero_invsrccolor_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ZERO_INVSRCCOLOR_FOG];
-	frag_textured_smooth_dstcolor_srcalpha_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_DSTCOLOR_SRCALPHA_FOG];
-	frag_textured_smooth_one_invsrcalpha_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_ONE_INVSRCALPHA_FOG];
-	frag_textured_smooth_invsrcalpha_srcalpha_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_INVSRCALPHA_SRCALPHA_FOG];
-	frag_multitexture_modulate_translucent_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_TRANSLUCENT_FOG];
-	frag_multitexture_modulate_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_MODULATE_BLEND_FOG];
-	frag_multitexture_decal_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_DECAL_BLEND_FOG];
-	frag_multitexture_replace_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_MULTITEXTURE_REPLACE_BLEND_FOG];
-	/* Register-constrained blend fog, slots 102..106. */
-	frag_untextured_smooth_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_FOG];
-	frag_untextured_smooth_blend_add_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_ADD_FOG];
-	frag_untextured_smooth_blend_srcalpha_one_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG];
-	frag_textured_smooth_blend_add_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_ADD_FOG];
-	frag_textured_smooth_blend_srcalpha_one_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_BLEND_SRCALPHA_ONE_FOG];
-	/* Untextured flat blend fog, slots 107..109. */
-	frag_untextured_blend_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_FOG];
-	frag_untextured_blend_add_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_ADD_FOG];
-	frag_untextured_blend_srcalpha_one_fog = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_BLEND_SRCALPHA_ONE_FOG];
-	/* Smooth points, slots 110..113. */
-	frag_untextured_point_smooth        = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_POINT_SMOOTH];
-	frag_untextured_smooth_point_smooth = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_UNTEXTURED_SMOOTH_POINT_SMOOTH];
-	frag_textured_point_smooth          = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_POINT_SMOOTH];
-	frag_textured_smooth_point_smooth   = &v3d_shader_variants[V3D_SHADER_VARIANT_FRAGMENT_TEXTURED_SMOOTH_POINT_SMOOTH];
-
-	for (i = 0; i < vex->numInstructions; i++)
-		shader_vex[i] = byteswap64(vex->instructions[i]);
-	for (i = 0; i < coord->numInstructions; i++)
-		shader_coord[i] = byteswap64(coord->instructions[i]);
-	for (i = 0; i < frag->numInstructions; i++)
-		shader_frag[i] = byteswap64(frag->instructions[i]);
-	for (i = 0; i < frag_textured->numInstructions; i++)
-		shader_frag_textured[i] = byteswap64(frag_textured->instructions[i]);
-	for (i = 0; i < vex_smooth->numInstructions; i++)
-		shader_vex_smooth[i] = byteswap64(vex_smooth->instructions[i]);
-	for (i = 0; i < frag_smooth->numInstructions; i++)
-		shader_frag_smooth[i] = byteswap64(frag_smooth->instructions[i]);
-	for (i = 0; i < vex_smooth_textured->numInstructions; i++)
-		shader_vex_smooth_textured[i] = byteswap64(vex_smooth_textured->instructions[i]);
-	for (i = 0; i < frag_textured_smooth->numInstructions; i++)
-		shader_frag_textured_smooth[i] = byteswap64(frag_textured_smooth->instructions[i]);
-	for (i = 0; i < frag_untextured_fog->numInstructions; i++)
-		shader_frag_untextured_fog[i] = byteswap64(frag_untextured_fog->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest->numInstructions; i++)
-		shader_frag_untextured_alphatest[i] = byteswap64(frag_untextured_alphatest->instructions[i]);
-	for (i = 0; i < frag_textured_fog->numInstructions; i++)
-		shader_frag_textured_fog[i] = byteswap64(frag_textured_fog->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest->numInstructions; i++)
-		shader_frag_textured_alphatest[i] = byteswap64(frag_textured_alphatest->instructions[i]);
-	for (i = 0; i < vex_multitexture->numInstructions; i++)
-		shader_vex_multitexture[i] = byteswap64(vex_multitexture->instructions[i]);
-	for (i = 0; i < frag_multitexture->numInstructions; i++)
-		shader_frag_multitexture[i] = byteswap64(frag_multitexture->instructions[i]);
-	for (i = 0; i < frag_untextured_blend->numInstructions; i++)
-		shader_frag_untextured_blend[i] = byteswap64(frag_untextured_blend->instructions[i]);
-	for (i = 0; i < frag_untextured_blend_add->numInstructions; i++)
-		shader_frag_untextured_blend_add[i] = byteswap64(frag_untextured_blend_add->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_blend_add->numInstructions; i++)
-		shader_frag_untextured_smooth_blend_add[i] = byteswap64(frag_untextured_smooth_blend_add->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_blend->numInstructions; i++)
-		shader_frag_untextured_smooth_blend[i] = byteswap64(frag_untextured_smooth_blend->instructions[i]);
-	for (i = 0; i < frag_textured_blend->numInstructions; i++)
-		shader_frag_textured_blend[i] = byteswap64(frag_textured_blend->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend->numInstructions; i++)
-		shader_frag_textured_smooth_blend[i] = byteswap64(frag_textured_smooth_blend->instructions[i]);
-	for (i = 0; i < frag_textured_padded_flat_test->numInstructions; i++)
-		shader_frag_textured_padded_flat_test[i] = byteswap64(frag_textured_padded_flat_test->instructions[i]);
-	for (i = 0; i < coord_clipspace->numInstructions; i++)
-		shader_coord_clipspace[i] = byteswap64(coord_clipspace->instructions[i]);
-	for (i = 0; i < vex_smooth_textured_clipspace->numInstructions; i++)
-		shader_vex_smooth_textured_clipspace[i] = byteswap64(vex_smooth_textured_clipspace->instructions[i]);
-	for (i = 0; i < vex_multitexture_clipspace->numInstructions; i++)
-		shader_vex_multitexture_clipspace[i] = byteswap64(vex_multitexture_clipspace->instructions[i]);
-	for (i = 0; i < frag_multitexture_decal->numInstructions; i++)
-		shader_frag_multitexture_decal[i] = byteswap64(frag_multitexture_decal->instructions[i]);
-	for (i = 0; i < frag_multitexture_replace->numInstructions; i++)
-		shader_frag_multitexture_replace[i] = byteswap64(frag_multitexture_replace->instructions[i]);
-	for (i = 0; i < frag_multitexture_modulate_blend->numInstructions; i++)
-		shader_frag_multitexture_modulate_blend[i] = byteswap64(frag_multitexture_modulate_blend->instructions[i]);
-	for (i = 0; i < frag_multitexture_decal_blend->numInstructions; i++)
-		shader_frag_multitexture_decal_blend[i] = byteswap64(frag_multitexture_decal_blend->instructions[i]);
-	for (i = 0; i < frag_multitexture_replace_blend->numInstructions; i++)
-		shader_frag_multitexture_replace_blend[i] = byteswap64(frag_multitexture_replace_blend->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest_greater->numInstructions; i++)
-		shader_frag_untextured_alphatest_greater[i] = byteswap64(frag_untextured_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_greater->numInstructions; i++)
-		shader_frag_textured_alphatest_greater[i] = byteswap64(frag_textured_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_greater->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_greater[i] = byteswap64(frag_textured_smooth_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest[i] = byteswap64(frag_textured_smooth_alphatest->instructions[i]);
-	for (i = 0; i < frag_multitexture_modulate_translucent->numInstructions; i++)
-		shader_frag_multitexture_modulate_translucent[i] = byteswap64(frag_multitexture_modulate_translucent->instructions[i]);
-	for (i = 0; i < frag_textured_colormod->numInstructions; i++)
-		shader_frag_textured_colormod[i] = byteswap64(frag_textured_colormod->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend_add->numInstructions; i++)
-		shader_frag_textured_smooth_blend_add[i] = byteswap64(frag_textured_smooth_blend_add->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_zero->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_zero[i] = byteswap64(frag_textured_smooth_dstcolor_zero->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_one->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_one[i] = byteswap64(frag_textured_smooth_dstcolor_one->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_srccolor->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_srccolor[i] = byteswap64(frag_textured_smooth_dstcolor_srccolor->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_invdstalpha->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_invdstalpha[i] = byteswap64(frag_textured_smooth_dstcolor_invdstalpha->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_zero_invsrccolor->numInstructions; i++)
-		shader_frag_textured_smooth_zero_invsrccolor[i] = byteswap64(frag_textured_smooth_zero_invsrccolor->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_srcalpha->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_srcalpha[i] = byteswap64(frag_textured_smooth_dstcolor_srcalpha->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_one_invsrcalpha->numInstructions; i++)
-		shader_frag_textured_smooth_one_invsrcalpha[i] = byteswap64(frag_textured_smooth_one_invsrcalpha->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_invsrcalpha_srcalpha->numInstructions; i++)
-		shader_frag_textured_smooth_invsrcalpha_srcalpha[i] = byteswap64(frag_textured_smooth_invsrcalpha_srcalpha->instructions[i]);
-	for (i = 0; i < frag_untextured_blend_srcalpha_one->numInstructions; i++)
-		shader_frag_untextured_blend_srcalpha_one[i] = byteswap64(frag_untextured_blend_srcalpha_one->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_blend_srcalpha_one->numInstructions; i++)
-		shader_frag_untextured_smooth_blend_srcalpha_one[i] = byteswap64(frag_untextured_smooth_blend_srcalpha_one->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend_srcalpha_one->numInstructions; i++)
-		shader_frag_textured_smooth_blend_srcalpha_one[i] = byteswap64(frag_textured_smooth_blend_srcalpha_one->instructions[i]);
-	/* The remaining alpha_func variants: 5 funcs x 3 shapes. */
-	for (i = 0; i < frag_untextured_alphatest_never->numInstructions; i++)
-		shader_frag_untextured_alphatest_never[i] = byteswap64(frag_untextured_alphatest_never->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_never->numInstructions; i++)
-		shader_frag_textured_alphatest_never[i] = byteswap64(frag_textured_alphatest_never->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_never->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_never[i] = byteswap64(frag_textured_smooth_alphatest_never->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest_less->numInstructions; i++)
-		shader_frag_untextured_alphatest_less[i] = byteswap64(frag_untextured_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_less->numInstructions; i++)
-		shader_frag_textured_alphatest_less[i] = byteswap64(frag_textured_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_less->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_less[i] = byteswap64(frag_textured_smooth_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest_equal->numInstructions; i++)
-		shader_frag_untextured_alphatest_equal[i] = byteswap64(frag_untextured_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_equal->numInstructions; i++)
-		shader_frag_textured_alphatest_equal[i] = byteswap64(frag_textured_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_equal->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_equal[i] = byteswap64(frag_textured_smooth_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest_lequal->numInstructions; i++)
-		shader_frag_untextured_alphatest_lequal[i] = byteswap64(frag_untextured_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_lequal->numInstructions; i++)
-		shader_frag_textured_alphatest_lequal[i] = byteswap64(frag_textured_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_lequal->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_lequal[i] = byteswap64(frag_textured_smooth_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_untextured_alphatest_notequal->numInstructions; i++)
-		shader_frag_untextured_alphatest_notequal[i] = byteswap64(frag_untextured_alphatest_notequal->instructions[i]);
-	for (i = 0; i < frag_textured_alphatest_notequal->numInstructions; i++)
-		shader_frag_textured_alphatest_notequal[i] = byteswap64(frag_textured_alphatest_notequal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_alphatest_notequal->numInstructions; i++)
-		shader_frag_textured_smooth_alphatest_notequal[i] = byteswap64(frag_textured_smooth_alphatest_notequal->instructions[i]);
-	/* Combined fog + alpha test, slots 62..75 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	for (i = 0; i < frag_untextured_fog_alphatest->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest[i] = byteswap64(frag_untextured_fog_alphatest->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest->numInstructions; i++)
-		shader_frag_textured_fog_alphatest[i] = byteswap64(frag_textured_fog_alphatest->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_greater->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_greater[i] = byteswap64(frag_untextured_fog_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_greater->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_greater[i] = byteswap64(frag_textured_fog_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_less->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_less[i] = byteswap64(frag_untextured_fog_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_less->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_less[i] = byteswap64(frag_textured_fog_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_equal->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_equal[i] = byteswap64(frag_untextured_fog_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_equal->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_equal[i] = byteswap64(frag_textured_fog_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_lequal->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_lequal[i] = byteswap64(frag_untextured_fog_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_lequal->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_lequal[i] = byteswap64(frag_textured_fog_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_notequal->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_notequal[i] = byteswap64(frag_untextured_fog_alphatest_notequal->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_notequal->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_notequal[i] = byteswap64(frag_textured_fog_alphatest_notequal->instructions[i]);
-	for (i = 0; i < frag_untextured_fog_alphatest_never->numInstructions; i++)
-		shader_frag_untextured_fog_alphatest_never[i] = byteswap64(frag_untextured_fog_alphatest_never->instructions[i]);
-	for (i = 0; i < frag_textured_fog_alphatest_never->numInstructions; i++)
-		shader_frag_textured_fog_alphatest_never[i] = byteswap64(frag_textured_fog_alphatest_never->instructions[i]);
-	/* Smooth fog, slots 76..84 -- see
-	 * v3d_shader_assembler.h's enum comment for the lockstep rules. */
-	for (i = 0; i < frag_untextured_smooth_fog->numInstructions; i++)
-		shader_frag_untextured_smooth_fog[i] = byteswap64(frag_untextured_smooth_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog->numInstructions; i++)
-		shader_frag_textured_smooth_fog[i] = byteswap64(frag_textured_smooth_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest[i] = byteswap64(frag_textured_smooth_fog_alphatest->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_greater->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_greater[i] = byteswap64(frag_textured_smooth_fog_alphatest_greater->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_less->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_less[i] = byteswap64(frag_textured_smooth_fog_alphatest_less->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_equal->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_equal[i] = byteswap64(frag_textured_smooth_fog_alphatest_equal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_lequal->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_lequal[i] = byteswap64(frag_textured_smooth_fog_alphatest_lequal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_notequal->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_notequal[i] = byteswap64(frag_textured_smooth_fog_alphatest_notequal->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_fog_alphatest_never->numInstructions; i++)
-		shader_frag_textured_smooth_fog_alphatest_never[i] = byteswap64(frag_textured_smooth_fog_alphatest_never->instructions[i]);
-	/* Multitexture fog, slots 85..87. */
-	for (i = 0; i < frag_multitexture_fog->numInstructions; i++)
-		shader_frag_multitexture_fog[i] = byteswap64(frag_multitexture_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_decal_fog->numInstructions; i++)
-		shader_frag_multitexture_decal_fog[i] = byteswap64(frag_multitexture_decal_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_replace_fog->numInstructions; i++)
-		shader_frag_multitexture_replace_fog[i] = byteswap64(frag_multitexture_replace_fog->instructions[i]);
-	/* Software-blend fog, slots 88..101. */
-	for (i = 0; i < frag_textured_blend_fog->numInstructions; i++)
-		shader_frag_textured_blend_fog[i] = byteswap64(frag_textured_blend_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend_fog->numInstructions; i++)
-		shader_frag_textured_smooth_blend_fog[i] = byteswap64(frag_textured_smooth_blend_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_zero_fog->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_zero_fog[i] = byteswap64(frag_textured_smooth_dstcolor_zero_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_one_fog->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_one_fog[i] = byteswap64(frag_textured_smooth_dstcolor_one_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_srccolor_fog->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_srccolor_fog[i] = byteswap64(frag_textured_smooth_dstcolor_srccolor_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_invdstalpha_fog->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_invdstalpha_fog[i] = byteswap64(frag_textured_smooth_dstcolor_invdstalpha_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_zero_invsrccolor_fog->numInstructions; i++)
-		shader_frag_textured_smooth_zero_invsrccolor_fog[i] = byteswap64(frag_textured_smooth_zero_invsrccolor_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_dstcolor_srcalpha_fog->numInstructions; i++)
-		shader_frag_textured_smooth_dstcolor_srcalpha_fog[i] = byteswap64(frag_textured_smooth_dstcolor_srcalpha_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_one_invsrcalpha_fog->numInstructions; i++)
-		shader_frag_textured_smooth_one_invsrcalpha_fog[i] = byteswap64(frag_textured_smooth_one_invsrcalpha_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_invsrcalpha_srcalpha_fog->numInstructions; i++)
-		shader_frag_textured_smooth_invsrcalpha_srcalpha_fog[i] = byteswap64(frag_textured_smooth_invsrcalpha_srcalpha_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_modulate_translucent_fog->numInstructions; i++)
-		shader_frag_multitexture_modulate_translucent_fog[i] = byteswap64(frag_multitexture_modulate_translucent_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_modulate_blend_fog->numInstructions; i++)
-		shader_frag_multitexture_modulate_blend_fog[i] = byteswap64(frag_multitexture_modulate_blend_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_decal_blend_fog->numInstructions; i++)
-		shader_frag_multitexture_decal_blend_fog[i] = byteswap64(frag_multitexture_decal_blend_fog->instructions[i]);
-	for (i = 0; i < frag_multitexture_replace_blend_fog->numInstructions; i++)
-		shader_frag_multitexture_replace_blend_fog[i] = byteswap64(frag_multitexture_replace_blend_fog->instructions[i]);
-	/* Register-constrained blend fog, slots 102..106. */
-	for (i = 0; i < frag_untextured_smooth_blend_fog->numInstructions; i++)
-		shader_frag_untextured_smooth_blend_fog[i] = byteswap64(frag_untextured_smooth_blend_fog->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_blend_add_fog->numInstructions; i++)
-		shader_frag_untextured_smooth_blend_add_fog[i] = byteswap64(frag_untextured_smooth_blend_add_fog->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_blend_srcalpha_one_fog->numInstructions; i++)
-		shader_frag_untextured_smooth_blend_srcalpha_one_fog[i] = byteswap64(frag_untextured_smooth_blend_srcalpha_one_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend_add_fog->numInstructions; i++)
-		shader_frag_textured_smooth_blend_add_fog[i] = byteswap64(frag_textured_smooth_blend_add_fog->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_blend_srcalpha_one_fog->numInstructions; i++)
-		shader_frag_textured_smooth_blend_srcalpha_one_fog[i] = byteswap64(frag_textured_smooth_blend_srcalpha_one_fog->instructions[i]);
-	/* Untextured flat blend fog, slots 107..109. */
-	for (i = 0; i < frag_untextured_blend_fog->numInstructions; i++)
-		shader_frag_untextured_blend_fog[i] = byteswap64(frag_untextured_blend_fog->instructions[i]);
-	for (i = 0; i < frag_untextured_blend_add_fog->numInstructions; i++)
-		shader_frag_untextured_blend_add_fog[i] = byteswap64(frag_untextured_blend_add_fog->instructions[i]);
-	for (i = 0; i < frag_untextured_blend_srcalpha_one_fog->numInstructions; i++)
-		shader_frag_untextured_blend_srcalpha_one_fog[i] = byteswap64(frag_untextured_blend_srcalpha_one_fog->instructions[i]);
-	/* Smooth points, slots 110..113. */
-	for (i = 0; i < frag_untextured_point_smooth->numInstructions; i++)
-		shader_frag_untextured_point_smooth[i] = byteswap64(frag_untextured_point_smooth->instructions[i]);
-	for (i = 0; i < frag_untextured_smooth_point_smooth->numInstructions; i++)
-		shader_frag_untextured_smooth_point_smooth[i] = byteswap64(frag_untextured_smooth_point_smooth->instructions[i]);
-	for (i = 0; i < frag_textured_point_smooth->numInstructions; i++)
-		shader_frag_textured_point_smooth[i] = byteswap64(frag_textured_point_smooth->instructions[i]);
-	for (i = 0; i < frag_textured_smooth_point_smooth->numInstructions; i++)
-		shader_frag_textured_smooth_point_smooth[i] = byteswap64(frag_textured_smooth_point_smooth->instructions[i]);
+		for (k = 0; k < s->numInstructions; k++)
+			dst[k] = byteswap64(s->instructions[k]);
+	}
 
 	{
 		struct ExecBase* const SysBase = context->device.sysbase;
@@ -1446,16 +808,8 @@ static int gl_EnsureShaders(GLcontext context)
 	}
 
 	backend->shaders_ready = TRUE;
-	D(("gl_EnsureShaders: shaders assembled and validated OK\n"));
-	D(("gl_EnsureShaders: OK, vex=%ld coord=%ld frag=%ld frag_textured=%ld vex_smooth=%ld frag_smooth=%ld vex_smooth_textured=%ld frag_textured_smooth=%ld fog=%ld alphatest=%ld tex_fog=%ld tex_alphatest=%ld vex_multitex=%ld frag_multitex=%ld untextured_blend=%ld instructions, code_mem=%08lx\n",
-	   (LONG)vex->numInstructions, (LONG)coord->numInstructions, (LONG)frag->numInstructions,
-	   (LONG)frag_textured->numInstructions, (LONG)vex_smooth->numInstructions, (LONG)frag_smooth->numInstructions,
-	   (LONG)vex_smooth_textured->numInstructions, (LONG)frag_textured_smooth->numInstructions,
-	   (LONG)frag_untextured_fog->numInstructions, (LONG)frag_untextured_alphatest->numInstructions,
-	   (LONG)frag_textured_fog->numInstructions, (LONG)frag_textured_alphatest->numInstructions,
-	   (LONG)vex_multitexture->numInstructions, (LONG)frag_multitexture->numInstructions,
-	   (LONG)frag_untextured_blend->numInstructions,
-	   (ULONG)backend->shader_code_mem.hostptr));
+	D(("gl_EnsureShaders: OK, %ld variants in %ld bytes (was 114 x 1024 = 116736), code_mem=%08lx\n",
+	   (LONG)V3D_MAX_SHADER_VARIANTS, (LONG)total, (ULONG)backend->shader_code_mem.hostptr));
 	return 0;
 }
 
@@ -1472,11 +826,6 @@ static int gl_EnsureShaders(GLcontext context)
  * data would need a FIXED vertex-buffer address, which a new glBegin/glEnd's
  * fresh vertex data cannot reuse anyway.
  */
-
-/* The point size the current pass rasterizes with (POINT_SIZE, sent below
- * once per pass). The smooth-point shaders measure distance in pixels
- * against it, so they get this value rather than the live glPointSize. */
-static GLfloat s_pass_point_size = 1.0f;
 
 static void gl_EnsureDrawState(GLcontext context)
 {
@@ -1498,20 +847,16 @@ static void gl_EnsureDrawState(GLcontext context)
 	 * gl_EmitCullBlendState instead. This function keeps only what does not
 	 * vary within a pass. */
 
-	/* Point size and line width come from the GL app's real glPointSize/
-	 * glLineWidth (context->CurrentPointSize/CurrentLineWidth,
-	 * vertexbuffer_min.c).
+	/* POINT_SIZE and LINE_WIDTH are NOT here: glPointSize and glLineWidth are
+	 * ordinary GL state that applies to every primitive issued after them, so
+	 * a once-per-pass value would give a pass whichever size happened to be
+	 * live at its first draw. They are emitted per draw from
+	 * gl_EmitCullBlendState, dirty-cached so an unchanged value costs a float
+	 * compare and no CL bytes. MESA sends POINT_SIZE on every draw on ver==42
+	 * anyway (v3dx_emit.c:429-434, a binner-FIFO erratum workaround that needs
+	 * "any CLE command" per draw).
 	 *
-	 * This function runs once per PASS (draw_state_configured, reset by
-	 * gl_FrameBegin), so a pass that changes point size or line width
-	 * between batches gets whichever value was live at its first draw. That
-	 * is a deliberate deviation: MESA sends POINT_SIZE on every draw on
-	 * ver==42 (v3dx_emit.c:429-434, a binner-FIFO erratum workaround that
-	 * needs "any CLE command" per draw). */
-	PointSize(backend, context->CurrentPointSize);
-	s_pass_point_size = context->CurrentPointSize;
-	LineWidth(backend, context->CurrentLineWidth);
-	/* ColorWriteMasks is NOT here either, for the same reason as CfgBits:
+	 * ColorWriteMasks is NOT here either, for the same reason as CfgBits:
 	 * glColorMask can be toggled more than once within a single frame, so a
 	 * once-per-pass value would only ever reflect whichever call happened to
 	 * be active when the first draw of the pass ran. It is emitted per draw
@@ -1551,6 +896,10 @@ typedef struct
 	int   cfg_valid;
 	int   do_valid;
 	float do_f, do_u;
+	int   ps_valid;
+	float ps;
+	int   lw_valid;
+	float lw;
 	int   vp_valid;
 	int   cw_valid;
 	int   bl_valid;
@@ -1578,6 +927,8 @@ static void dd_sync(void)
 		s_dd.cw_valid  = 0;
 		s_dd.bl_valid  = 0;
 		s_dd.cwm_valid = 0;
+		s_dd.ps_valid  = 0;
+		s_dd.lw_valid  = 0;
 	}
 }
 
@@ -1665,6 +1016,24 @@ static void gl_EmitCullBlendState(GLcontext context, GLboolean smooth, GLboolean
 		/* MESA-style dedup (see mglv3d_dedup_cache above). */
 		dd_sync();
 
+		/* POINT_SIZE and LINE_WIDTH, per draw. glPointSize and glLineWidth
+		 * apply to every primitive issued after them, so a value set between
+		 * two draws of one pass has to reach the second. Dirty-cached: a
+		 * program that sets the size once pays one float compare per draw and
+		 * emits nothing. */
+		if (!s_dd.ps_valid || s_dd.ps != context->CurrentPointSize)
+		{
+			PointSize(backend, context->CurrentPointSize);
+			s_dd.ps = context->CurrentPointSize;
+			s_dd.ps_valid = 1;
+		}
+		if (!s_dd.lw_valid || s_dd.lw != context->CurrentLineWidth)
+		{
+			LineWidth(backend, context->CurrentLineWidth);
+			s_dd.lw = context->CurrentLineWidth;
+			s_dd.lw_valid = 1;
+		}
+
 		/* eze (early_z_enable) and ezue (early_z_updates_enable) share
 		 * one condition, matching MESA's gallium driver (v3dx_emit.c),
 		 * which inside its depth_enabled gate sets
@@ -1748,7 +1117,24 @@ static void gl_EmitCullBlendState(GLcontext context, GLboolean smooth, GLboolean
 				 * converted into MRD multiples. MGL_ZOFFSET_UNITS_SCALE is
 				 * CALIBRATED, NOT DERIVED: it maps a -0.0009 depth delta, the
 				 * magnitude that convention uses, onto -2.0 units, the
-				 * GL-conventional magnitude. */
+				 * GL-conventional magnitude.
+				 *
+				 * CALIBRATED AGAINST the depth-offset verification demo, which
+				 * is a magnitude SWEEP, not a pass/fail test: it draws
+				 * glPolygonOffset at -1000, -10 and -2 beside
+				 * mglSetZOffset(-0.0009) on a real Z tie, and -2.0 is the
+				 * smallest GL magnitude that reliably wins it on this
+				 * hardware. 2222 is what puts the MGL convention's one
+				 * canonical value there.
+				 *
+				 * DO NOT "FIX" THIS INTO THE DIMENSIONAL CONVERSION. A [0,1]
+				 * delta against the hardware's 1/2^24 offset step would scale
+				 * by 16777216, turning -0.0009 into -15099 units -- some 7500x
+				 * the magnitude the sweep showed is needed, which peels
+				 * surfaces apart instead of breaking a tie. The dimensional
+				 * answer is right about units and wrong about this API: what
+				 * callers pass is the Warp3D knob where -0.0009 means "nudge
+				 * it just enough", not a depth delta they computed. */
 				#define MGL_ZOFFSET_UNITS_SCALE 2222.0f
 
 				if (context->PolygonOffsetFill_State == GL_TRUE)
@@ -1932,16 +1318,6 @@ UBYTE g_mglv3d_frame_prim_types_seen = 0; /* bit N set = primType N used this fr
  * at 0 would make the first upload of every texture look like a mid-frame
  * reuse hazard. See that field's comment (v3d_texture.h). */
 int g_mglv3d_frame_number = 1;
-
-/* Raw IEEE-754 bit-pattern check (no libm isnan/isinf on this cross
- * compiler): exponent field all-1s means NaN or Inf either way -- both
- * are equally "bad" for a vertex position feeding the GPU. */
-static int mglv3d_float_is_bad(float f)
-{
-	union { float f; LONG l; } u;
-	u.f = f;
-	return ((u.l >> 23) & 0xFF) == 0xFF;
-}
 
 extern v3d_u32 g_v3d_cl_generation;
 
@@ -2188,6 +1564,71 @@ static inline void d_PackPos3(FLOAT* p, const MGLVertex* v)
 	swap_float32_into(&p[2], v->v.z);
 }
 
+/*
+ * The object-space NORMAL, byte-swapped into the GPU's scratch, for a lit draw.
+ *
+ * Why a gather at all, rather than pointing an attribute record straight at
+ * NormalBuffer -- there are two independent blockers and both are fatal:
+ *
+ *   - The attribute record has NO byte-order field. Every other attribute in
+ *     this driver reaches the GPU big-endian-swapped through a packed scratch
+ *     buffer for exactly this reason.
+ *
+ *   - MGLVertex.normal is a GLuint INDEX into NormalBuffer, not a normal. It
+ *     advances once per glNormal3f CALL, so N consecutive vertices sharing one
+ *     normal all carry the same index, and a vertex emitted before any
+ *     glNormal3f carries 0. No base + index * stride record can follow that.
+ *
+ * WHICH SLOT. Exactly draw.c's texgen rule, and getting this wrong throws away
+ * the most common way an application sets a normal:
+ *
+ *     nbp = (NormalBufferPointer > 0) ? v->normal : 0
+ *
+ * SLOT 0 IS NOT A FALLBACK, IT IS THE CURRENT NORMAL. GLBegin copies the last
+ * pushed normal down into slot 0 and then rewinds the pointer to 0
+ * (vertexbuffer_min.c), so a glNormal3f issued BEFORE glBegin -- which is how
+ * nearly every application and every scene in a client application does it -- lives in
+ * slot 0 with the pointer at 0. Substituting a constant there instead of
+ * reading it discards that normal and shades the whole object with (0,0,1).
+ * It is the same rule GL_CURRENT_NORMAL answers with (others.c).
+ *
+ * THE (0,0,1) SUBSTITUTION then applies only where it should: no glNormal3f has
+ * ever happened, so slot 0 still holds the (0,0,0) context.c initialises it to,
+ * while GL's default current normal is (0,0,1).
+ *
+ * It is detected by VALUE rather than by a "was a normal ever set" flag: the
+ * value test needs no extra state and reads the same whichever path wrote the
+ * normal.
+ *
+ * The cost of the value test, stated rather than hidden: an application that
+ * really does set glNormal3f(0,0,0) gets (0,0,1) instead. GL would give it a zero
+ * dot product and therefore ambient only. A zero normal is degenerate input --
+ * texgen already skips it (see this file's v_GenTexCoords) -- and no real
+ * application sets one, but it is a divergence and not a rounding difference.
+ *
+ * Doing the substitution here rather than changing NormalBuffer[0] at context
+ * creation is what keeps it local: that global default feeds GL_SPHERE_MAP texgen
+ * in every shipping game that never calls glNormal3f, and changing it would alter
+ * their output.
+ */
+static inline void d_PackNormal3(FLOAT* p, const MGLVertex* v, const GLcontext context)
+{
+	int              nbp = (context->NormalBufferPointer > 0) ? (int)v->normal : 0;
+	const MGLNormal* n   = &context->NormalBuffer[nbp];
+
+	if (nbp == 0 && n->x == 0.0f && n->y == 0.0f && n->z == 0.0f)
+	{
+		swap_float32_into(&p[0], 0.0f);
+		swap_float32_into(&p[1], 0.0f);
+		swap_float32_into(&p[2], 1.0f);
+		return;
+	}
+
+	swap_float32_into(&p[0], n->x);
+	swap_float32_into(&p[1], n->y);
+	swap_float32_into(&p[2], n->z);
+}
+
 /* s,t,r,g then b,a -- the combined arm's order, see its R/B note. */
 static inline void d_PackCombined(FLOAT* t, FLOAT* t2, const MGLVertex* v)
 {
@@ -2267,6 +1708,16 @@ static inline GLboolean d_HasRealW(const MGLVertex* vb, const int* indices, int 
 
 extern ULONG g_mglv3d_combined_serial; /* matrix.c */
 
+/* One-shot latch for the "this texture environment has no variant" report,
+ * a file static for the same reason the lit one below is. */
+static int s_texenv_excl_said = 0;
+
+/* One-shot latch for the "lighting is on but this draw cannot be lit" report.
+ * A file static and not a context field: it is a diagnostic about the build's
+ * capabilities, the same for every context, and a game could hit the condition
+ * on every draw of every frame. */
+static int s_lit_excl_said;
+
 /* Shape flags of a shader state record: with the two code offsets and the
  * shader code base, every input of d_BuildShaderRecord except the per-draw
  * addresses. */
@@ -2277,8 +1728,48 @@ extern ULONG g_mglv3d_combined_serial; /* matrix.c */
 #define D_SR_TEXTURED         0x010UL
 #define D_SR_ALPHATEST        0x020UL
 #define D_SR_SMOOTH_POINT     0x040UL
-#define D_SR_MULTITEX_BLEND   0x080UL
+/* Set when the draw's fragment shader is a SMOOTH-shape alpha
+ * test variant that neither D_SR_ALPHATEST nor D_SR_SMOOTH_ALPHATEST already
+ * covers: the untextured smooth family, and a lit draw's alpha test under
+ * GL_FLAT. It exists so the passthrough-Z flag stays 1:1 with the shaders that
+ * carry a `tlbu` write. */
+#define D_SR_SMOOTH_SHAPE_ALPHATEST 0x080UL
 #define D_SR_NEEDS_REAL_W     0x100UL
+/* GL_COLOR_MATERIAL on a lit draw: the colour attribute record comes BACK,
+ * as a fourth record when textured and in texbuf2's place when not. */
+#define D_SR_COLORMATERIAL    0x400UL
+/* Lit: the draw takes a lit vertex shader, carries a NORMAL attribute record and
+ * carries NO colour one. It is the tenth bit and it is not a refinement of
+ * `smooth` -- see the varying count below for why it must not be keyed on it. */
+#define D_SR_LIT              0x200UL
+
+/* The lit uniform tail, read in this order by the lit vertex shaders; the
+ * stream is positional so the order is the contract, not a convention:
+ *   0..11   modelview rows 1..3, four words each, for P_eye = MV . (p,1)
+ *   12..20  the 3x3 inverse-transpose by rows, for N_eye = InvT . n
+ *   21..23  the light position, in EYE space
+ *   24      shininess
+ *   25..27  diffuse product
+ *   28..30  specular product
+ *   31..34  base colour rgb + alpha
+ * There is no view direction: eye-space V is (0,0,1) for a non-local viewer,
+ * so the shaders use a constant rather than three words. */
+#define D_LIT_TAIL_FLOATS 35
+#define D_LIT_TAIL_BYTES  (D_LIT_TAIL_FLOATS * sizeof(float))
+
+/* GL_COLOR_MATERIAL EXTENDS that tail rather than rearranging it. Every term
+ * the vertex colour replaces stays linear in it, so light.c folds each one to
+ * K0 + K1 * C and these ten words are the K1 half:
+ *   35..43  three words PER CHANNEL, in r,g,b order: the base scale
+ *           (emission and ambient together), the diffuse scale, then the
+ *           specular scale. Grouped by channel and not by component because
+ *           that is how the shaders read it -- one scratch register carries
+ *           k = base + diffuse*N.L + specular*spec for one channel at a time.
+ *   44      alpha scale
+ * Words 0..34 keep their meaning, which is why the five shaders that read the
+ * plain tail are untouched. */
+#define D_LIT_CM_TAIL_FLOATS 45
+#define D_LIT_CM_TAIL_BYTES  (D_LIT_CM_TAIL_FLOATS * sizeof(float))
 
 /* The template patch below relies on this layout: a 36-byte record whose
  * per-draw addresses are the whole words at 8, 16, 24 and 32, then 16-byte
@@ -2286,20 +1777,20 @@ extern ULONG g_mglv3d_combined_serial; /* matrix.c */
 typedef char d_sr_layout_check[(sizeof(v3d_gl_shader_state_record) == 36 &&
                                 sizeof(v3d_gl_shader_state_attribute_record) == 16) ? 1 : -1];
 
-#define D_SR_MAXWORDS ((sizeof(v3d_gl_shader_state_record) + 3 * sizeof(v3d_gl_shader_state_attribute_record)) / 4)
+#define D_SR_MAXWORDS ((sizeof(v3d_gl_shader_state_record) + 4 * sizeof(v3d_gl_shader_state_attribute_record)) / 4)
 
 /*
  * The shader state record and its attribute records, as gl_EmitPrimitiveV3DEx
- * has always built them, written to dst (36 + 16 * 2 or 3 bytes). The
- * attribute records go through glShaderStateAttributeRecord against a local
- * buffer over dst, which places them directly after the record exactly as
- * their claims from state_buf did.
+ * builds them, written to dst (36 + 16 * 2 or 3 bytes). The attribute records
+ * go through glShaderStateAttributeRecord against a local buffer over dst,
+ * which places them directly after the record.
  */
 static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v3d_u8* dst, ULONG shape,
                                                           ULONG frag_code_offset, ULONG vex_code_offset,
                                                           ULONG default_attr_values_address, ULONG unif_frag_address,
                                                           ULONG unif_vex_address, ULONG unif_coord_address,
-                                                          FLOAT* posbuf, FLOAT* texbuf, FLOAT* texbuf2)
+                                                          FLOAT* posbuf, FLOAT* texbuf, FLOAT* texbuf2,
+                                                          FLOAT* colbuf)
 {
 	GLboolean combined         = (shape & D_SR_COMBINED)         ? GL_TRUE : GL_FALSE;
 	GLboolean smooth_alphatest = (shape & D_SR_SMOOTH_ALPHATEST) ? GL_TRUE : GL_FALSE;
@@ -2308,8 +1799,10 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 	GLboolean textured         = (shape & D_SR_TEXTURED)         ? GL_TRUE : GL_FALSE;
 	GLboolean alphatest        = (shape & D_SR_ALPHATEST)        ? GL_TRUE : GL_FALSE;
 	GLboolean smooth_point     = (shape & D_SR_SMOOTH_POINT)     ? GL_TRUE : GL_FALSE;
-	GLboolean multitex_blend   = (shape & D_SR_MULTITEX_BLEND)   ? GL_TRUE : GL_FALSE;
 	GLboolean needs_real_w     = (shape & D_SR_NEEDS_REAL_W)     ? GL_TRUE : GL_FALSE;
+	GLboolean lit              = (shape & D_SR_LIT)              ? GL_TRUE : GL_FALSE;
+	GLboolean smooth_shape_alphatest = (shape & D_SR_SMOOTH_SHAPE_ALPHATEST) ? GL_TRUE : GL_FALSE;
+	GLboolean colormaterial    = (shape & D_SR_COLORMATERIAL)    ? GL_TRUE : GL_FALSE;
 	v3d_gl_shader_state_record* shader = (v3d_gl_shader_state_record*)dst;
 	v3d_static_buffer attrs;
 	v3d_static_buffer* saved_buf = backend->current_buf;
@@ -2333,7 +1826,19 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 	/* Only the smooth-point shaders read the implicit point coordinate; on any
 	 * other shader the two extra varyings would shift every read. */
 	shader->disable_implicit_point_line_varyings = smooth_point ? FALSE : TRUE;
-	shader->number_of_varyings_in_fragment_shader = (combined || smooth_alphatest) ? 6 : (smooth ? 4 : (multitextured ? 4 : (textured ? 2 : 0)));
+	/* LIT FIRST, and NOT keyed on `smooth`. A lit draw pairs with the smooth
+	 * fragment shaders whatever the GL shade model is, because its whole output
+	 * is a per-vertex colour that has to be interpolated -- so it needs 6
+	 * varyings textured (s,t,r,g,b,a) and 4 untextured (r,g,b,a) regardless.
+	 *
+	 * Keying this on `smooth` would give a GL_FLAT lit textured draw 2 varyings
+	 * and shift every varying read in the fragment shader. GL_FLAT plus lighting
+	 * is wrong by construction anyway -- a per-vertex lit colour exists to be
+	 * interpolated -- so the lit arm deliberately overrides the shade model here
+	 * rather than honouring it. */
+	shader->number_of_varyings_in_fragment_shader =
+		lit ? (multitextured ? 8 : (textured ? 6 : 4))
+		    : ((combined || smooth_alphatest) ? 6 : (smooth ? 4 : (multitextured ? 4 : (textured ? 2 : 0))));
 
 	/* MESA sets this from prog_data.fs->lock_scoreboard_on_first_thrsw
 	 * (v3dx_draw.c:490 and :583), and sets that flag true whenever a thrsw is
@@ -2344,13 +1849,9 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 	 * An unlocked ldtlb shows up as a tile-boundary "sprinkle" artifact.
 	 *
 	 * Set for exactly the shaders that read the TLB (ldtlb), as MESA does --
-	 * locking the scoreboard earlier than needed costs inter-thread
-	 * parallelism on every other draw. The only ldtlb consumer the dispatch
-	 * still names is multitex_blend, which no draw selects, so in practice
-	 * this is FALSE throughout. The ldtlb shaders in v3d_assembler.c keep
-	 * their thrsw-before-ldtlb prologue; the field only chooses which thread
-	 * switch takes the lock, so one half is inert without the other. */
-	shader->do_scoreboard_wait_on_first_thread_switch = multitex_blend ? 1 : 0;
+	 * locking the scoreboard earlier than needed costs inter-thread parallelism
+	 * on every other draw. No shader reads the TLB, so this is 0. */
+	shader->do_scoreboard_wait_on_first_thread_switch = 0;
 
 	/* PASSTHROUGH DEPTH WRITE. Every alphatest shader variant carries a
 	 * `tlbu` Z write, and so do the four smooth-point shaders.
@@ -2384,7 +1885,12 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 		 * shader, which has NO tlbu, and this stays FALSE for it. */
 		/* The four smooth-point shaders carry the same tlbu write (they
 		 * discard outside the disc). */
-		GLboolean zwrite_shader = (alphatest || smooth_alphatest || smooth_point) ? GL_TRUE : GL_FALSE;
+		/* D_SR_SMOOTH_SHAPE_ALPHATEST covers the two shapes the first two
+		 * predicates miss: the untextured smooth family, and a lit draw's
+		 * alpha test under GL_FLAT, where `alphatest` is set but the shader
+		 * taken is a smooth one. Both carry the same tlbu write. */
+		GLboolean zwrite_shader = (alphatest || smooth_alphatest || smooth_point ||
+		                           smooth_shape_alphatest) ? GL_TRUE : GL_FALSE;
 		shader->turn_off_early_z_test      = zwrite_shader ? TRUE : FALSE;
 		shader->fragment_shader_does_z_writes = zwrite_shader ? TRUE : FALSE;
 	}
@@ -2395,29 +1901,39 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 	 * input/output VPM segments -- vir.c:837-848 folds the input into the
 	 * output segment and v3dx_draw.c:613-618 sends a literal 1 here, paired
 	 * with VCM_CACHE_SIZE before every GL_SHADER_STATE. */
+	/* TWO SECTORS WHENEVER THE INPUT EXCEEDS 8 WORDS, which is the formula and
+	 * not a shape list -- align(words, 8) / 8:
+	 *   lit textured   3 position + 2 texcoord + 3 normal  = 8  -> 1
+	 *   lit real-w     4 position + 2 texcoord + 3 normal  = 9  -> 2
+	 *   combined       3 position + 2 texcoord + 4 colour   = 9  -> 2
+	 *   smooth tex cs  4 position + 2 texcoord + 4 colour   = 10 -> 2 */
 	shader->vertex_shader_input_vpm_segment_size =
-		(combined || smooth_alphatest) ? 2 : 1;
+		(((combined || smooth_alphatest) && !lit) || (lit && needs_real_w)
+		  || (lit && multitextured) || (lit && colormaterial))
+			? 2 : 1;
 	shader->address_of_default_attribute_values = LE32(default_attr_values_address);
 
-	shader->fragment_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + frag_code_offset) >> 3;
+	shader->fragment_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + g_shader_offset[frag_code_offset]) >> 3;
 	shader->fragment_shader_uniforms_address = LE32(unif_frag_address);
 	shader->fragment_shader_4_way_threadable = TRUE;
 	shader->fragment_shader_start_in_final_thread_section = FALSE;
 	shader->fragment_shader_propagate_nans = TRUE;
 
-	shader->vertex_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + vex_code_offset) >> 3;
+	shader->vertex_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + g_shader_offset[vex_code_offset]) >> 3;
 	shader->vertex_shader_uniforms_address = LE32(unif_vex_address);
 	shader->vertex_shader_4_way_threadable = TRUE;
 	shader->vertex_shader_start_in_final_thread_section = TRUE;
 	shader->vertex_shader_propagate_nans = TRUE;
 
-	/* A needs_real_w draw routes to the real-w coordinate shader (+15360,
+	/* A needs_real_w draw routes to the real-w coordinate shader (slot 13,
 	 * COORDINATE_CLIPSPACE) -- position-only, generic across every variant,
 	 * unchanged by which vertex shader is paired with it -- instead of the
-	 * shared COORDINATE_TEXTURED (+1024) every other variant reuses. Must
+	 * shared COORDINATE_TEXTURED (slot 1) every other variant reuses. Slot
+	 * numbers, not byte offsets: the shaders are packed, so the address comes
+	 * from g_shader_offset below rather than slot * 1024. Must
 	 * agree with posbuf's own 4-component widening below, since the
 	 * coordinate and vertex shaders consume the same attribute records. */
-	shader->coordinate_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + (needs_real_w ? 15360 : 1024)) >> 3;
+	shader->coordinate_shader_code_address_rshift_3 = (ULONG)((ULONG)backend->shader_code_mem.hostptr + g_shader_offset[needs_real_w ? 13 : 1]) >> 3;
 	shader->coordinate_shader_uniforms_address = LE32(unif_coord_address);
 	shader->coordinate_shader_4_way_threadable = TRUE;
 	shader->coordinate_shader_start_in_final_thread_section = TRUE;
@@ -2430,7 +1946,7 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 
 	attrs.start      = dst + sizeof(v3d_gl_shader_state_record);
 	attrs.used       = 0;
-	attrs.capacity   = 3 * sizeof(v3d_gl_shader_state_attribute_record);
+	attrs.capacity   = 4 * sizeof(v3d_gl_shader_state_attribute_record);
 	attrs.overflowed = 0;
 	backend->current_buf = &attrs;
 
@@ -2459,13 +1975,85 @@ static __attribute__((noinline)) void d_BuildShaderRecord(V3DContext* backend, v
 	 * 4 is the genuine maximum, and asking for 6 is undefined behaviour that
 	 * corrupts the 3rd real component. See texbuf's own claim-site comment
 	 * for the layout this produces. */
-	i = combined ? 4 : (smooth ? 4 : (multitextured ? 4 : 2));
-	glShaderStateAttributeRecord(backend, texbuf, FALSE, FALSE, FALSE, v3d_VEC_4,
-	                              v3d_ATTRIBUTE_FLOAT, i, 0, 0, (i * sizeof(float)), 0xFFFFFF);
-	if (combined || smooth_alphatest)
+	/*
+	 * THE LIT RECORD SHAPES. A lit draw carries NO colour record at all -- GL
+	 * fixed-function lighting ignores the per-vertex colour -- and that is what
+	 * pays for the normal without a fourth record:
+	 *
+	 *   lit untextured : posbuf(3) + normbuf(3)              = 2 records
+	 *   lit textured   : posbuf(3) + texbuf(2 s,t) + normbuf(3) = 3 records
+	 *
+	 * So attrs.capacity stays 3, D_SR_MAXWORDS stays 21, s_srec_tpl stays 21
+	 * ULONGs, and the whole fourth-record chain never arises. Per-vertex
+	 * attribute bytes actually go DOWN by 4 against the unlit equivalents.
+	 *
+	 * The normal rides the EXISTING texbuf/texbuf2 parameters rather than a new
+	 * one: untextured it is texbuf, textured it is texbuf2. That keeps the
+	 * `nwords > 17` test further down correct exactly as written.
+	 *
+	 * novrbcs is 0 for the normal, as it is for every non-position record: the
+	 * binning pass runs the coordinate shader, which reads position only.
+	 */
+	if (lit && !textured)
+	{
+		/* texbuf carries the NORMAL here, 3 components, not a texcoord. */
+		glShaderStateAttributeRecord(backend, texbuf, FALSE, FALSE, FALSE, v3d_VEC_3,
+		                              v3d_ATTRIBUTE_FLOAT, 3, 0, 0, (3 * sizeof(float)), 0xFFFFFF);
+	}
+	else if (lit && multitextured)
+	{
+		/* FOUR components, both texcoord pairs, and the normal follows in
+		 * texbuf2 exactly as it does for the lit textured arm below. */
+		glShaderStateAttributeRecord(backend, texbuf, FALSE, FALSE, FALSE, v3d_VEC_4,
+		                              v3d_ATTRIBUTE_FLOAT, 4, 0, 0, (4 * sizeof(float)), 0xFFFFFF);
+	}
+	else if (lit && textured)
+	{
+		/* TWO components, s and t, and NOT the `i` below -- a lit textured draw
+		 * satisfies `combined`, so `i` would be 4 and declare a 4-component
+		 * record over a buffer holding 2 floats per vertex. That does not merely
+		 * read two words of rubbish: every attribute record's VPM offset follows
+		 * the one before it, so a 4-word record here pushes the normal from words
+		 * 5-7 to words 7-9 and the shader reads its normal from whatever sits at
+		 * 5-7. The lit colour then tracks nothing recognisable. */
+		glShaderStateAttributeRecord(backend, texbuf, FALSE, FALSE, FALSE, v3d_VEC_2,
+		                              v3d_ATTRIBUTE_FLOAT, 2, 0, 0, (2 * sizeof(float)), 0xFFFFFF);
+	}
+	else
+	{
+		i = combined ? 4 : (smooth ? 4 : (multitextured ? 4 : 2));
+		glShaderStateAttributeRecord(backend, texbuf, FALSE, FALSE, FALSE, v3d_VEC_4,
+		                              v3d_ATTRIBUTE_FLOAT, i, 0, 0, (i * sizeof(float)), 0xFFFFFF);
+	}
+
+	if (lit && textured)
+	{
+		/* texbuf2 carries the normal, 3 components rather than the 2 a combined
+		 * draw's (b,a) tail uses. */
+		glShaderStateAttributeRecord(backend, texbuf2, FALSE, FALSE, FALSE, v3d_VEC_3,
+		                              v3d_ATTRIBUTE_FLOAT, 3, 0, 0, (3 * sizeof(float)), 0xFFFFFF);
+	}
+	else if (lit && colormaterial)
+	{
+		/* Lit UNTEXTURED with colour material: texbuf is the normal and texbuf2
+		 * is the COLOUR, four components. This shape leaves texbuf2 free, so it
+		 * still has three records and needs no fourth. */
+		glShaderStateAttributeRecord(backend, texbuf2, FALSE, FALSE, FALSE, v3d_VEC_4,
+		                              v3d_ATTRIBUTE_FLOAT, 4, 0, 0, (4 * sizeof(float)), 0xFFFFFF);
+	}
+	else if (combined || smooth_alphatest)
 	{
 		glShaderStateAttributeRecord(backend, texbuf2, FALSE, FALSE, FALSE, v3d_VEC_2,
 		                              v3d_ATTRIBUTE_FLOAT, 2, 0, 0, (2 * sizeof(float)), 0xFFFFFF);
+	}
+
+	/* THE FOURTH RECORD, and the only shape that has one: lit, textured and
+	 * tracking the vertex colour. It goes LAST so the position, texcoord and
+	 * normal inputs keep the indices they already had. */
+	if (lit && textured && colormaterial)
+	{
+		glShaderStateAttributeRecord(backend, colbuf, FALSE, FALSE, FALSE, v3d_VEC_4,
+		                              v3d_ATTRIBUTE_FLOAT, 4, 0, 0, (4 * sizeof(float)), 0xFFFFFF);
 	}
 
 	backend->current_buf = saved_buf;
@@ -2504,14 +2092,27 @@ typedef struct
 /* The vertex and coordinate uniform blocks. Their 80 bytes are a function of
  * CombinedMatrix (tracked by g_mglv3d_combined_serial: m_CombineMatrices is
  * its only writer and bumps it), use_clip_space, sx, sy, sz, az and FPCR
- * (sx*2.0f rounds only on overflow, but it is an FPU result). */
+ * (sx*2.0f rounds only on overflow, but it is an FPU result).
+ *
+ * A LIT draw appends a 16-float tail, so the key carries three more terms: `lit`
+ * (the block sizes differ), `light_serial` (bumped by every lighting call --
+ * without it a second lit draw in one frame reuses the first's block, every other
+ * term still matching) and `light_mask` SEPARATELY, because the tail is compacted
+ * so which light lands in it depends on the mask. No new matrix term:
+ * g_mglv3d_combined_serial already covers the modelview and its inverse.
+ *
+ * ONE slot, not two. A scene that alternates lit and unlit draws therefore
+ * rewrites the block every draw -- 20 to 36 swap_float32_into calls -- which is
+ * a throughput question, never a correctness one. Two slots indexed by `lit` would
+ * fix it if it ever measures. */
 typedef struct
 {
 	v3d_u8* sb_start;
 	v3d_u32 gen;
 	ULONG   serial, fpcr, sx, sy, sz, az;
 	ULONG   vu, cu;
-	int     clip, valid;
+	ULONG   light_serial, light_mask;
+	int     clip, lit, valid;
 } d_vu_memo;
 
 /* The ClipWindow rectangle and the viewport UWORDs: pure functions of these
@@ -2722,6 +2323,12 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	if (primType < 8) g_mglv3d_frame_prim_types_seen |= (1 << primType);
 	ULONG default_attr_values_address;
 	FLOAT* posbuf;
+	/* Lit draws only: the object-space normal, fused onto the end of the posbuf
+	 * claim. It is then handed to d_BuildShaderRecord through the texbuf or
+	 * texbuf2 parameter depending on whether the draw is textured -- see the
+	 * claim site and d_BuildShaderRecord's own lit record comment. */
+	FLOAT* normbuf = NULL;
+	FLOAT* colbuf  = NULL;   /* GL_COLOR_MATERIAL only; fused behind normbuf */
 	FLOAT* texbuf;
 	FLOAT* texbuf2; /* combined and smooth_alphatest only: b,a split out of
 	                 * texbuf -- see texbuf's own claim site for why. */
@@ -2744,6 +2351,8 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	GLboolean fog;
 	GLboolean alphatest;
 	GLboolean smooth_alphatest;
+	GLboolean smooth_untex_alphatest;
+	GLboolean lit_alphatest;
 	/* Which alphatest shader slot the current alpha_func selects, for each
 	 * of the shapes that carry an alpha test. Only meaningful when the
 	 * matching umbrella predicate is GL_TRUE, and only evaluated then. */
@@ -2751,17 +2360,24 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	ULONG smooth_alphatest_code_offset = 0;
 	ULONG fog_alphatest_code_offset = 0;
 	ULONG smooth_fog_alphatest_code_offset = 0;
+	/* These two fold in the fog arm, because their families are contiguous and
+	 * laid out plain-then-fogged, so one switch covers both. */
+	ULONG smooth_untex_alphatest_code_offset = 0;
+	ULONG lit_alphatest_code_offset = 0;
 	GLboolean multitextured;
 	V3DTexture* bound_tex2;
 	ULONG textureShaderStateAddress2 = 0, textureSamplerStateAddress2 = 0;
 	ULONG vex_code_offset, frag_code_offset;
 	GLboolean replace_white;
+	GLboolean env_add;
+	GLboolean env_blend;
 	GLboolean clipspace_combined;
 	GLboolean clipspace_multitextured;
+	GLboolean lit;
+	GLboolean colormaterial;
 	GLboolean needs_real_w;
 	GLboolean draw_has_real_w;
 	GLboolean real_w_combined;
-	GLboolean multitex_blend;
 	int multitex_env;
 	GLboolean smooth_point;
 	/* GL_TEXTURE -- see v_TexMatrixActive for why the texture matrix is
@@ -2770,7 +2386,7 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	volatile v_TexMatrix texmat;
 	int texmat_on;
 	/* This draw's state_buf/state_mem slot, loaded once: nothing this function
-	 * calls writes build_slot, and GCC could not know that, so it recomputed
+	 * calls writes build_slot, and GCC cannot know that, so it would recompute
 	 * both addresses for every claim. */
 	v3d_static_buffer* sb;
 	v3d_mem* sm;
@@ -2818,6 +2434,12 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 */
 	bound_tex = (context->Texture2D_State[0] == GL_TRUE)
 	            ? context->textureObjects[context->CurrentBinding] : NULL;
+	/* INCOMPLETE TEXTURES DO NOT TEXTURE. glBindTexture creates the object on
+	 * first bind (GL 1.1 3.8.8), so an object can exist with no level 0 yet --
+	 * width 0, no GPU allocation. GL disables texturing for such a unit, and
+	 * sampling it here would emit state for memory that was never allocated. */
+	if (bound_tex != NULL && bound_tex->width == 0)
+		bound_tex = NULL;
 	textured = (bound_tex != NULL) ? GL_TRUE : GL_FALSE;
 
 	if (textured)
@@ -2846,6 +2468,9 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * single-texture path. */
 	bound_tex2 = (context->Texture2D_State[1] == GL_TRUE)
 	             ? context->textureObjects[context->VirtualBinding] : NULL;
+	/* Incomplete on unit 1 too -- see the bound_tex test above. */
+	if (bound_tex2 != NULL && bound_tex2->width == 0)
+		bound_tex2 = NULL;
 	multitextured = (textured && bound_tex2 != NULL) ? GL_TRUE : GL_FALSE;
 
 	if (multitextured)
@@ -2865,34 +2490,33 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		}
 	}
 
-	/* Combine-mode dispatch for multitexture. multitex_env reads unit 1's OWN
-	 * texenv_mode (bound_tex2), which MGLDrawMultitexBuffer sets from its
-	 * TexEnv argument and glTexEnvi sets through tex_SetEnv when unit 1 is
-	 * the active texture unit (texture.c) -- 0=MODULATE,
-	 * 1=DECAL, 2=REPLACE, matching V3D_TEXENV_* ordinal values
-	 * (v3d_texture.h).
+	/* Combine-mode dispatch for multitexture. multitex_env reads UNIT 1's
+	 * environment -- context->TexEnv[1], which MGLDrawMultitexBuffer sets from
+	 * its TexEnv argument and glTexEnvi sets through tex_SetEnv when unit 1 is
+	 * the active texture unit (texture.c). Reading the bound texture's own
+	 * texenv_mode instead would make the unit's combine change with every
+	 * bind, which GL 1.1 3.8.9 forbids.
 	 *
-	 * multitex_blend is permanently GL_FALSE. It selects the "_blend"
-	 * fragment shader variants, which read the tile buffer via `ldtlb` and
-	 * blend against it entirely in software; the fixed-function hardware
-	 * blend (`be`, gl_EmitCullBlendState) is the single source of truth
-	 * instead. MGLDrawMultitexBuffer calls GLBlendFunc internally
-	 * (texture.c), setting the same blend_srcmode/blend_dstmode/Blend_State
-	 * fields gl_EmitCullBlendState reads, so selecting a software-blend
-	 * shader here as well would DOUBLE-blend: once in the shader via ldtlb,
-	 * once again via hardware blend on top of that already-blended output.
-	 * Multitextured draws therefore always take the plain (non-blend)
-	 * MODULATE/DECAL/REPLACE combine shader. The `_blend` variants stay in
-	 * v3d_assembler.c, unreachable from here. */
+	 * A multitextured draw always takes the plain MODULATE/DECAL/REPLACE
+	 * combine shader. There is no software-blend counterpart reading the tile
+	 * buffer via `ldtlb` and blending in the shader: the fixed-function
+	 * hardware blend (`be`, gl_EmitCullBlendState) is the single source of
+	 * truth, and MGLDrawMultitexBuffer already calls GLBlendFunc internally
+	 * (texture.c), so blending in the shader as well would blend twice over
+	 * the same output. */
 	multitex_env = 0;
-	multitex_blend = GL_FALSE;
 	if (multitextured)
 	{
+		/* This draw is the multitextured one MGLDrawMultitexBuffer's state was
+		 * meant for, so its pending flag is answered. Inside the existing
+		 * multitextured branch, so an ordinary draw adds no term. */
+		g_mgl_mtex_flush_pending = 0;
+
 		if (bound_tex2)
 		{
-			if (bound_tex2->texenv_mode == V3D_TEXENV_DECAL)
+			if (context->TexEnv[1] == GL_DECAL)
 				multitex_env = 1;
-			else if (bound_tex2->texenv_mode == V3D_TEXENV_REPLACE)
+			else if (context->TexEnv[1] == GL_REPLACE)
 				multitex_env = 2;
 		}
 	}
@@ -2937,14 +2561,14 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	if (smooth_alphatest)
 	switch (context->backend.alpha_func)
 	{
-		case V3D_ALPHAFUNC_NEVER:    smooth_alphatest_code_offset = 50176; break;
-		case V3D_ALPHAFUNC_LESS:     smooth_alphatest_code_offset = 53248; break;
-		case V3D_ALPHAFUNC_EQUAL:    smooth_alphatest_code_offset = 56320; break;
-		case V3D_ALPHAFUNC_LEQUAL:   smooth_alphatest_code_offset = 59392; break;
-		case V3D_ALPHAFUNC_GREATER:  smooth_alphatest_code_offset = 43008; break;
-		case V3D_ALPHAFUNC_NOTEQUAL: smooth_alphatest_code_offset = 62464; break;
-		case V3D_ALPHAFUNC_GEQUAL:   smooth_alphatest_code_offset = 44032; break;
-		default:                     smooth_alphatest_code_offset = 44032; break;
+		case V3D_ALPHAFUNC_NEVER:    smooth_alphatest_code_offset = 25; break;
+		case V3D_ALPHAFUNC_LESS:     smooth_alphatest_code_offset = 28; break;
+		case V3D_ALPHAFUNC_EQUAL:    smooth_alphatest_code_offset = 31; break;
+		case V3D_ALPHAFUNC_LEQUAL:   smooth_alphatest_code_offset = 34; break;
+		case V3D_ALPHAFUNC_GREATER:  smooth_alphatest_code_offset = 21; break;
+		case V3D_ALPHAFUNC_NOTEQUAL: smooth_alphatest_code_offset = 37; break;
+		case V3D_ALPHAFUNC_GEQUAL:   smooth_alphatest_code_offset = 22; break;
+		default:                     smooth_alphatest_code_offset = 22; break;
 	}
 	/* `combined` excludes `multitextured` and `smooth_alphatest` by
 	 * construction, the same mutually-exclusive-by-construction pattern
@@ -3038,12 +2662,12 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 
 
 	/* The flat shape's alpha test. `!smooth` is what separates it from
-	 * `smooth_alphatest` above, which covers the smooth+textured shape.
-	 * Neither predicate covers a smooth UNTEXTURED draw, and both carry
-	 * `!multitextured`, so a multitextured draw gets no alpha test either:
-	 * there is no shader variant for either shape, so such a draw gets no
-	 * alpha-test discard whatever the app's GL_ALPHA_TEST state says. A dedicated shader variant would be the
-	 * fix, not relaxing this condition.
+	 * `smooth_alphatest` above, which covers the smooth+textured shape, and
+	 * from `smooth_untex_alphatest` below, which covers the smooth untextured
+	 * one. All three carry `!multitextured`, so a MULTITEXTURED draw still
+	 * gets no alpha-test discard whatever the app's GL_ALPHA_TEST state says:
+	 * no variant exists for that shape. A dedicated family is the fix there
+	 * too, not relaxing this condition.
 	 *
 	 * GL_ALWAYS is excluded for the same reason as in the smooth shape above:
 	 * it is definitionally "alpha test disabled", and clearing this umbrella
@@ -3059,14 +2683,14 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	if (alphatest)
 	switch (context->backend.alpha_func)
 	{
-		case V3D_ALPHAFUNC_NEVER:    alphatest_code_offset = textured ? 49152 : 48128; break;
-		case V3D_ALPHAFUNC_LESS:     alphatest_code_offset = textured ? 52224 : 51200; break;
-		case V3D_ALPHAFUNC_EQUAL:    alphatest_code_offset = textured ? 55296 : 54272; break;
-		case V3D_ALPHAFUNC_LEQUAL:   alphatest_code_offset = textured ? 58368 : 57344; break;
-		case V3D_ALPHAFUNC_GREATER:  alphatest_code_offset = textured ? 24576 : 23552; break;
-		case V3D_ALPHAFUNC_NOTEQUAL: alphatest_code_offset = textured ? 61440 : 60416; break;
-		case V3D_ALPHAFUNC_GEQUAL:   alphatest_code_offset = textured ? 11264 : 9216;  break;
-		default:                     alphatest_code_offset = textured ? 11264 : 9216;  break;
+		case V3D_ALPHAFUNC_NEVER:    alphatest_code_offset = textured ? 24 : 23; break;
+		case V3D_ALPHAFUNC_LESS:     alphatest_code_offset = textured ? 27 : 26; break;
+		case V3D_ALPHAFUNC_EQUAL:    alphatest_code_offset = textured ? 30 : 29; break;
+		case V3D_ALPHAFUNC_LEQUAL:   alphatest_code_offset = textured ? 33 : 32; break;
+		case V3D_ALPHAFUNC_GREATER:  alphatest_code_offset = textured ? 19 : 18; break;
+		case V3D_ALPHAFUNC_NOTEQUAL: alphatest_code_offset = textured ? 36 : 35; break;
+		case V3D_ALPHAFUNC_GEQUAL:   alphatest_code_offset = textured ? 10 : 8;  break;
+		default:                     alphatest_code_offset = textured ? 10 : 8;  break;
 	}
 	/* No shape exclusions: every primitive shape this driver can draw has a
 	 * fog shader -- flat and smooth, untextured, textured and multitextured,
@@ -3074,20 +2698,41 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * asked for it. */
 	fog = (context->backend.fog_enable) ? GL_TRUE : GL_FALSE;
 
+	/* The smooth UNTEXTURED shape's alpha test -- the shape neither predicate
+	 * above reaches, `alphatest` needing !smooth and `smooth_alphatest`
+	 * needing textured. It is mutually exclusive with both by construction,
+	 * so neither of them changes. Its family is contiguous and laid out plain
+	 * (70..76) then fogged (77..83), so one switch covers fog as well. */
+	smooth_untex_alphatest = (!textured && smooth && !multitextured &&
+	           context->backend.alpha_func != V3D_ALPHAFUNC_ALWAYS &&
+	           context->backend.alpha_test_enable == GL_TRUE) ? GL_TRUE : GL_FALSE;
+	if (smooth_untex_alphatest)
+	switch (context->backend.alpha_func)
+	{
+		case V3D_ALPHAFUNC_NEVER:    smooth_untex_alphatest_code_offset = fog ? 83 : 76; break;
+		case V3D_ALPHAFUNC_LESS:     smooth_untex_alphatest_code_offset = fog ? 79 : 72; break;
+		case V3D_ALPHAFUNC_EQUAL:    smooth_untex_alphatest_code_offset = fog ? 80 : 73; break;
+		case V3D_ALPHAFUNC_LEQUAL:   smooth_untex_alphatest_code_offset = fog ? 81 : 74; break;
+		case V3D_ALPHAFUNC_GREATER:  smooth_untex_alphatest_code_offset = fog ? 78 : 71; break;
+		case V3D_ALPHAFUNC_NOTEQUAL: smooth_untex_alphatest_code_offset = fog ? 82 : 75; break;
+		case V3D_ALPHAFUNC_GEQUAL:   smooth_untex_alphatest_code_offset = fog ? 77 : 70; break;
+		default:                     smooth_untex_alphatest_code_offset = fog ? 77 : 70; break;
+	}
+
 	/* Smooth fog + alpha test slot, same shape as the flat fog_alphatest
 	 * switch. Textured only -- smooth_alphatest itself requires textured,
 	 * so there is no untextured arm to pick. */
 	if (fog && smooth_alphatest)
 	switch (context->backend.alpha_func)
 	{
-		case V3D_ALPHAFUNC_NEVER:    smooth_fog_alphatest_code_offset = 86016; break;
-		case V3D_ALPHAFUNC_LESS:     smooth_fog_alphatest_code_offset = 81920; break;
-		case V3D_ALPHAFUNC_EQUAL:    smooth_fog_alphatest_code_offset = 82944; break;
-		case V3D_ALPHAFUNC_LEQUAL:   smooth_fog_alphatest_code_offset = 83968; break;
-		case V3D_ALPHAFUNC_GREATER:  smooth_fog_alphatest_code_offset = 80896; break;
-		case V3D_ALPHAFUNC_NOTEQUAL: smooth_fog_alphatest_code_offset = 84992; break;
-		case V3D_ALPHAFUNC_GEQUAL:   smooth_fog_alphatest_code_offset = 79872; break;
-		default:                     smooth_fog_alphatest_code_offset = 79872; break;
+		case V3D_ALPHAFUNC_NEVER:    smooth_fog_alphatest_code_offset = 60; break;
+		case V3D_ALPHAFUNC_LESS:     smooth_fog_alphatest_code_offset = 56; break;
+		case V3D_ALPHAFUNC_EQUAL:    smooth_fog_alphatest_code_offset = 57; break;
+		case V3D_ALPHAFUNC_LEQUAL:   smooth_fog_alphatest_code_offset = 58; break;
+		case V3D_ALPHAFUNC_GREATER:  smooth_fog_alphatest_code_offset = 55; break;
+		case V3D_ALPHAFUNC_NOTEQUAL: smooth_fog_alphatest_code_offset = 59; break;
+		case V3D_ALPHAFUNC_GEQUAL:   smooth_fog_alphatest_code_offset = 54; break;
+		default:                     smooth_fog_alphatest_code_offset = 54; break;
 	}
 
 	/* Combined fog + alpha test slot, same shape as the alphatest switch
@@ -3097,14 +2742,14 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	if (fog && alphatest)
 	switch (context->backend.alpha_func)
 	{
-		case V3D_ALPHAFUNC_NEVER:    fog_alphatest_code_offset = textured ? 76800 : 75776; break;
-		case V3D_ALPHAFUNC_LESS:     fog_alphatest_code_offset = textured ? 68608 : 67584; break;
-		case V3D_ALPHAFUNC_EQUAL:    fog_alphatest_code_offset = textured ? 70656 : 69632; break;
-		case V3D_ALPHAFUNC_LEQUAL:   fog_alphatest_code_offset = textured ? 72704 : 71680; break;
-		case V3D_ALPHAFUNC_GREATER:  fog_alphatest_code_offset = textured ? 66560 : 65536; break;
-		case V3D_ALPHAFUNC_NOTEQUAL: fog_alphatest_code_offset = textured ? 74752 : 73728; break;
-		case V3D_ALPHAFUNC_GEQUAL:   fog_alphatest_code_offset = textured ? 64512 : 63488; break;
-		default:                     fog_alphatest_code_offset = textured ? 64512 : 63488; break;
+		case V3D_ALPHAFUNC_NEVER:    fog_alphatest_code_offset = textured ? 51 : 50; break;
+		case V3D_ALPHAFUNC_LESS:     fog_alphatest_code_offset = textured ? 43 : 42; break;
+		case V3D_ALPHAFUNC_EQUAL:    fog_alphatest_code_offset = textured ? 45 : 44; break;
+		case V3D_ALPHAFUNC_LEQUAL:   fog_alphatest_code_offset = textured ? 47 : 46; break;
+		case V3D_ALPHAFUNC_GREATER:  fog_alphatest_code_offset = textured ? 41 : 40; break;
+		case V3D_ALPHAFUNC_NOTEQUAL: fog_alphatest_code_offset = textured ? 49 : 48; break;
+		case V3D_ALPHAFUNC_GEQUAL:   fog_alphatest_code_offset = textured ? 39 : 38; break;
+		default:                     fog_alphatest_code_offset = textured ? 39 : 38; break;
 	}
 
 	/* GL_POINT_SMOOTH: a points draw in one of the four base shapes takes a
@@ -3120,6 +2765,131 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	                !fog && !multitextured &&
 	                !(context->backend.alpha_test_enable && context->backend.alpha_func != V3D_ALPHAFUNC_ALWAYS))
 	               ? GL_TRUE : GL_FALSE;
+
+	/*
+	 * LIT. Two GL conditions and a list of exclusions.
+	 *
+	 * It has to sit HERE, after fog, alphatest and smooth_point are all settled,
+	 * and not up beside needs_real_w where the rest of the shape predicates are
+	 * -- those three are assigned further down than they look.
+	 *
+	 * ONE GL CONDITION, NOT TWO. GL lights nothing with GL_LIGHTING off however
+	 * many lights are on, so Lighting_State is the test. A NON-ZERO LightMask is
+	 * NOT also required: with GL_LIGHTING on and every light off GL still
+	 * applies the material emission and the light-model ambient, so such a draw
+	 * is lit and must not be sent down the unlit path.
+	 *
+	 * The reason given for excluding it -- no light to unroll, so the lit shader
+	 * would get an empty uniform tail -- does not hold, and the tail is why.
+	 * light_Fold ZEROES a disabled light's folded diffuse and specular, and folds
+	 * emission plus LightModelAmbient * Material.Ambient into LitBase whatever
+	 * the mask. With no light enabled the first-enabled-light scan below leaves
+	 * li = 0, so the tail carries LitDiffuse[0] and LitSpecular[0] as zeros and
+	 * the shader computes LitBase + N.L*0 + spec*0 == LitBase -- exactly GL's
+	 * answer here. The empty tail is the right tail.
+	 *
+	 * It costs those draws the lit shader where the unlit one would do. That is
+	 * the correct trade and it is narrow: no game here enables GL_LIGHTING.
+	 *
+	 * The remaining exclusions still apply, so a lighting-on-no-lights draw that
+	 * also needs multitexture is still drawn unlit and still loses its emission.
+	 *
+	 * THE EXCLUSIONS EXIST BECAUSE THERE IS ONE LIT VARIANT PAIR, NOT A MATRIX --
+	 * for the VERTEX-STAGE ones. A feature that lives in the vertex shader needs
+	 * a lit twin of it, and none exists. FOG IS NOT ONE OF THOSE: it is wholly
+	 * fragment-side, so the lit vertex shader pairs with the existing smooth-fog
+	 * fragment shader and needs no twin. ALPHA TEST IS THE SAME: it is a fragment
+	 * discard, so what it needs is the smooth-shape shader family, not a lit
+	 * twin -- see lit_alphatest below.
+	 *
+	 * The exclusion that actually bites is needs_real_w: the vex_code_offset chain
+	 * below tests (clipspace_combined || real_w_combined) FIRST, so without this
+	 * term a lit real-w draw would be handed the unlit +16384 shader and its
+	 * lighting would vanish silently, with no error raised anywhere.
+	 *
+	 * The one-shot E() is the point of deciding it here rather than letting arm
+	 * order decide it: the first run then says WHICH exclusion fired, instead of
+	 * it becoming a mystery about why one object in a lit scene came out flat.
+	 */
+	/* TWO EXCLUSIONS, both VERTEX-stage. Multitexture has its own vertex
+	 * shader AND its fragment shaders take a flat colour from uniforms with no
+	 * varying to put a lit one in, so that shape needs work on both stages.
+	 * Clip-space positions route to their own vertex shaders too.
+	 *
+	 * A REAL W IS NOT ONE: real_w_combined requires `combined` or
+	 * `smooth_alphatest`, both textured, and this predicate still excludes
+	 * multitextured and clip space -- so for a lit draw needs_real_w can only
+	 * mean that one shape, and VERTEX_LIT_REALW covers it. Its fragment side
+	 * needs nothing, a fragment shader seeing only interpolated varyings.
+	 *
+	 * FOG, ALPHA TEST and SMOOTH POINTS are not exclusions either, for the
+	 * same reason each time: a FRAGMENT-stage feature needs no lit vertex
+	 * shader, only the right fragment partner, because the lit tail extends
+	 * the VERTEX block alone. Fog's factor is the fragment's own interpolated
+	 * w; alpha test is a fragment discard; a smooth point's coordinate is an
+	 * IMPLICIT varying the hardware supplies and its size rides the fragment
+	 * stream. Each pairs with an existing shader and costs arms in
+	 * frag_code_offset, not a new shader. TEXTURED fog is included with the
+	 * rest: FRAGMENT_TEXTURED_SMOOTH_FOG reads the two TMU configs then eight
+	 * fog words and no colour, which is exactly what a lit textured fogged
+	 * draw writes. */
+	/* MULTITEXTURE IS ALLOWED FOR GL_MODULATE, UNFOGGED. That shape needs work
+	 * on both stages, the multitexture fragment shaders having no colour input
+	 * at all -- they compute texel0 x texel1 and read no uniform. GL_DECAL and
+	 * the fogged combines would each need their own lit fragment shader and
+	 * have none, so those still render unlit and still say so once per run.
+	 * GL_REPLACE would need no new shader, texel1 correctly replacing the
+	 * primary colour, but it is left out of the gate until decal exists rather
+	 * than special-cased. */
+	lit = (context->Lighting_State
+	       && (!multitextured || (!fog && multitex_env == 0))
+	       && !use_clip_space) ? GL_TRUE : GL_FALSE;
+
+	/* GL_COLOR_MATERIAL only means anything on a draw that is actually lit, and
+	 * every lit shape has a colour-material twin, so there is no exclusion here
+	 * beyond `lit` itself. It costs the colour attribute record and ten more
+	 * uniform words, which is why it is a separate shape rather than folded
+	 * into the plain lit shaders. */
+	colormaterial = (lit && context->ColorMaterial_State) ? GL_TRUE : GL_FALSE;
+
+	if (context->Lighting_State && !lit && !s_lit_excl_said)
+	{
+		s_lit_excl_said = 1;
+		E(("gl_EmitPrimitiveV3DEx: lighting is on but this draw renders UNLIT -- no "
+		   "lit variant exists for its shape. multitextured=%ld env=%ld fog=%ld "
+		   "clip_space=%ld. Said once per run.\n",
+		   (LONG)multitextured, (LONG)multitex_env, (LONG)fog,
+		   (LONG)use_clip_space));
+	}
+
+	/* THE LIT SHAPE'S ALPHA TEST. A lit draw's fragment stage is smooth
+	 * whatever the shade model -- frag_code_offset's lit arm is deliberately
+	 * not keyed on `smooth` -- so its alpha test must take a SMOOTH-shape
+	 * family, never the flat one `alphatest` selects. Textured takes the
+	 * existing textured smooth family; untextured takes the untextured family,
+	 * whose plain and fogged halves are contiguous. Decided here because `lit`
+	 * is only settled now, and read only by that arm.
+	 *
+	 * ALL FOUR COMBINATIONS ARE REACHABLE, textured or not and fogged or not,
+	 * because lit allows textured fog -- so every arm is a 4-way. The textured
+	 * fogged slots are the FRAGMENT_TEXTURED_SMOOTH_FOG_ALPHATEST family, which
+	 * reads eight fog words then the threshold and consumes the TLB config with
+	 * its tlbu write: the stream a lit textured fogged alpha-test draw writes,
+	 * word for word. */
+	lit_alphatest = (lit && context->backend.alpha_test_enable == GL_TRUE &&
+	                 context->backend.alpha_func != V3D_ALPHAFUNC_ALWAYS) ? GL_TRUE : GL_FALSE;
+	if (lit_alphatest)
+	switch (context->backend.alpha_func)
+	{
+		case V3D_ALPHAFUNC_NEVER:    lit_alphatest_code_offset = textured ? (fog ? 60 : 25) : (fog ? 83 : 76); break;
+		case V3D_ALPHAFUNC_LESS:     lit_alphatest_code_offset = textured ? (fog ? 56 : 28) : (fog ? 79 : 72); break;
+		case V3D_ALPHAFUNC_EQUAL:    lit_alphatest_code_offset = textured ? (fog ? 57 : 31) : (fog ? 80 : 73); break;
+		case V3D_ALPHAFUNC_LEQUAL:   lit_alphatest_code_offset = textured ? (fog ? 58 : 34) : (fog ? 81 : 74); break;
+		case V3D_ALPHAFUNC_GREATER:  lit_alphatest_code_offset = textured ? (fog ? 55 : 21) : (fog ? 78 : 71); break;
+		case V3D_ALPHAFUNC_NOTEQUAL: lit_alphatest_code_offset = textured ? (fog ? 59 : 37) : (fog ? 82 : 75); break;
+		case V3D_ALPHAFUNC_GEQUAL:   lit_alphatest_code_offset = textured ? (fog ? 54 : 22) : (fog ? 77 : 70); break;
+		default:                     lit_alphatest_code_offset = textured ? (fog ? 54 : 22) : (fog ? 77 : 70); break;
+	}
 
 	/* Default attribute values, from g_default_values_buff -- unused attribute
 	 * slots fall back to these. The block never changes, so one serves the
@@ -3179,8 +2949,16 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * are mutually exclusive by construction, so this one check covers all
 	 * of them. */
 	/* Lock-aware draw: a later draw of the same lock reuses the positions the
-	 * first one packed (s_lockpos). */
-	if (ix != NULL && !needs_real_w && !use_clip_space &&
+	 * first one packed (s_lockpos).
+	 *
+	 * A LIT DRAW IS EXCLUDED, and not for tidiness. normbuf is fused into the
+	 * posbuf claim below, so reusing a cached posbuf would also reuse whatever
+	 * normals sat behind it -- and this cache's key has no normal term at all,
+	 * while g_mglv3d_lock_epoch is bumped only by lock/unlock and position-array
+	 * changes, never by glNormal3f. A lit object would then be shaded by the
+	 * previous draw's normals, which reads as lighting that does not follow the
+	 * geometry. */
+	if (ix != NULL && !needs_real_w && !use_clip_space && !lit &&
 	    s_lockpos.buf != NULL &&
 	    s_lockpos.epoch == g_mglv3d_lock_epoch &&
 	    s_lockpos.gen == g_v3d_cl_generation &&
@@ -3194,7 +2972,43 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	}
 	else
 	{
-		posbuf = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb, count * (needs_real_w ? 4 : 3) * sizeof(float), &backend->frame);
+		/*
+		 * ONE claim, with normbuf FUSED onto the end of posbuf for a lit draw --
+		 * never a second claim.
+		 *
+		 * A second claim would add another v3d_cl_claim_fast point, and the grow
+		 * path "allocates a bigger block and claims from the start of it. Nothing
+		 * already claimed is copied" (v3d_clbuf.h). So if the normal's claim were
+		 * the one that grew the buffer, posbuf would still point into the
+		 * abandoned block while normbuf pointed into the new one, and the draw
+		 * would read positions from freed memory. Fusing makes that impossible by
+		 * construction rather than by ordering luck. It is the same hazard the
+		 * texbuf/texbuf2 pair already documents further down.
+		 *
+		 * THE NORMAL'S OFFSET FOLLOWS THE POSITION STRIDE, which is 4 components
+		 * for a real w and 3 otherwise -- the same expression the claim above
+		 * uses. A fixed `count * 3` would land the normals on the last quarter
+		 * of the positions for a real-w draw, and nothing would rasterise.
+		 */
+		posbuf = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb,
+		                                    count * ((needs_real_w ? 4 : 3) + (lit ? 3 : 0)
+		                                             + (colormaterial ? 4 : 0)) * sizeof(float),
+		                                    &backend->frame);
+		/* The NULL test is not a claim-failure guard -- nothing in this function
+		 * guards posbuf or texbuf, because the claim grows rather than fails, and
+		 * adding one here alone would be inconsistent. It is there because
+		 * NULL + count * 3 is a small NON-null wild pointer, which would write
+		 * over low memory instead of trapping. This keeps a failed claim behaving
+		 * exactly the way it already does for posbuf. */
+		if (lit && posbuf != NULL)
+			normbuf = posbuf + (count * (needs_real_w ? 4 : 3));
+		/* FUSED behind the normal, for the same reason the normal is fused
+		 * behind the position: a separate claim that grew state_buf would leave
+		 * both earlier pointers in the abandoned block. A lit draw is already
+		 * excluded from the position cache, so no cached block is ever read
+		 * with this layout assumed of it. */
+		if (colormaterial && posbuf != NULL)
+			colbuf = normbuf + (count * 3);
 	}
 
 	if (!pos_cached)
@@ -3403,7 +3217,40 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * never make the CPU's writes through it visible to the GPU, while
 	 * texbuf2's writes into the new block would be fine. A single claim makes
 	 * growth atomic with respect to this attribute pair. */
-	if (combined || smooth_alphatest)
+	/*
+	 * THE LIT ARMS FIRST. A lit draw carries no colour, so what the records hold
+	 * differs from every unlit shape:
+	 *
+	 *   lit untextured : texbuf IS normbuf. No claim at all is made here -- the
+	 *                    normal was already claimed, fused onto posbuf above.
+	 *   lit textured   : texbuf is s,t (2 floats) and texbuf2 IS normbuf, again
+	 *                    already claimed.
+	 *
+	 * So the lit path claims strictly less than the unlit one, and the
+	 * single-claim rule the comment above insists on is satisfied trivially:
+	 * there is only ever one claim in flight for the normal, the fused one.
+	 */
+	if (lit && !textured)
+	{
+		texbuf  = normbuf;
+		/* The colour rides texbuf2 here, which this shape otherwise leaves
+		 * free -- the same trick the normal already plays with texbuf. */
+		texbuf2 = colormaterial ? colbuf : NULL;
+	}
+	else if (lit && multitextured)
+	{
+		/* Both texcoord pairs; the normal is the fused one, as for lit textured. */
+		texbuf  = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb,
+		                                     count * 4 * sizeof(float), &backend->frame);
+		texbuf2 = normbuf;
+	}
+	else if (lit && textured)
+	{
+		texbuf  = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb,
+		                                     count * 2 * sizeof(float), &backend->frame);
+		texbuf2 = normbuf;
+	}
+	else if (combined || smooth_alphatest)
 	{
 		texbuf = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb,
 		                                    count * (i + 2) * sizeof(float), &backend->frame);
@@ -3426,8 +3273,62 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * replace, with no new shader variant. GL_DECAL takes the same
 	 * white-multiply path; it is identical to REPLACE for a texture with no
 	 * alpha channel. */
-	replace_white = (bound_tex && (bound_tex->texenv_mode == V3D_TEXENV_REPLACE ||
-	                                bound_tex->texenv_mode == V3D_TEXENV_DECAL)) ? GL_TRUE : GL_FALSE;
+	/* Unit 0's environment, read from the UNIT and not from the bound texture:
+	 * GL 1.1 3.8.9 makes it unit state, so binding a different texture must not
+	 * change it. bound_tex is still tested because the environment only applies
+	 * when there is a texture to apply it to.
+	 *
+	 * ONE SWITCH, ONE READ, AND NOTHING ON THE COMMON PATH. GL_MODULATE lands in
+	 * `default` and costs a single jump; the shape test that GL_ADD and GL_BLEND
+	 * need is computed inside their own arm, where it is the only place it is
+	 * read. Per-draw dispatch terms are measurable fps on this renderer, and
+	 * every draw in every game arrives here with GL_MODULATE.
+	 *
+	 * GL_REPLACE and GL_DECAL need no shader: white as the primary colour makes
+	 * the modulate the textured shaders already compute into the identity.
+	 * GL_ADD and GL_BLEND are different arithmetic and have their own, for the
+	 * two base shapes only -- `combined` and the terminal flat-textured case.
+	 * Fog, alpha test, lighting, smooth points and multitexture each dispatch
+	 * into a family with no GL_ADD or GL_BLEND member, so such a draw renders
+	 * GL_MODULATE and says so once per run. */
+	replace_white = GL_FALSE;
+	env_add       = GL_FALSE;
+	env_blend     = GL_FALSE;
+	if (bound_tex)
+	{
+		GLenum e0 = context->TexEnv[0];
+
+		switch (e0)
+		{
+			case GL_REPLACE:
+			case GL_DECAL:
+				replace_white = GL_TRUE;
+				break;
+
+			case GL_ADD:
+			case GL_BLEND:
+				if (!fog && !alphatest && !smooth_alphatest && !lit
+				    && !smooth_point && !multitextured)
+				{
+					if (e0 == GL_ADD) env_add   = GL_TRUE;
+					else              env_blend = GL_TRUE;
+				}
+				else if (!s_texenv_excl_said)
+				{
+					s_texenv_excl_said = 1;
+					E(("gl_EmitPrimitiveV3DEx: texture environment %s renders as GL_MODULATE -- "
+					   "no variant exists for this shape. fog=%ld alphatest=%ld lit=%ld "
+					   "point=%ld multitextured=%ld. Said once per run.\n",
+					   (e0 == GL_ADD) ? "GL_ADD" : "GL_BLEND",
+					   (LONG)fog, (LONG)(alphatest || smooth_alphatest), (LONG)lit,
+					   (LONG)smooth_point, (LONG)multitextured));
+				}
+				break;
+
+			default:
+				break;
+		}
+	}
 
 	/* One test for the whole draw. Nothing below reads texmat unless this is
 	 * non-zero, so the coefficients it leaves behind for an identity matrix are
@@ -3438,7 +3339,97 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * once and each shape has its own loop. The per-vertex chain at the end
 	 * is kept for texture-matrix draws (their volatile coefficients stay in
 	 * that loop), and it is the reference for what each loop writes. */
-	if (!texmat_on && (combined || smooth_alphatest))
+	/*
+	 * THE LIT ARM MUST COME FIRST, and this is the one place in the whole lit
+	 * path where getting the order wrong is silently destructive rather than
+	 * merely wrong: for a lit untextured draw texbuf IS normbuf, so any arm below
+	 * that packs a colour into texbuf would overwrite the normals with colours.
+	 * The geometry would still draw, lit by whatever the colour bytes happen to
+	 * mean as a direction.
+	 *
+	 * texmat_on is honoured here too: a lit draw with a texture matrix active
+	 * still needs its s,t transformed, so it falls through to the generic
+	 * per-vertex chain at the end -- which is why the lit predicate does NOT
+	 * exclude texmat_on, but this fast arm does.
+	 */
+	if (!texmat_on && lit)
+	{
+		FLOAT* n = normbuf;
+		FLOAT* t = texbuf;
+		FLOAT* c = colbuf;
+
+		if (seq)
+		{
+			const MGLVertex* v = vb;
+
+			for (i = 0; i < count; i++, v++, n += 3)
+			{
+				d_PackNormal3(n, v, context);
+				if (textured)
+				{
+					swap_float32_into(&t[0], v->v.u0);
+					swap_float32_into(&t[1], v->v.v0);
+					/* Unit 1's pair for a lit multitextured draw. The record
+					 * declares four components and the vertex shader reads this
+					 * pair at inputs 5 and 6. */
+					if (multitextured)
+					{
+						swap_float32_into(&t[2], v->v.u1);
+						swap_float32_into(&t[3], v->v.v1);
+						t += 4;
+					}
+					else
+						t += 2;
+				}
+				/* GL_COLOR_MATERIAL's own record, written last because it is
+				 * declared last. */
+				if (colormaterial)
+				{
+					swap_float32_into(&c[0], v->color.r);
+					swap_float32_into(&c[1], v->color.g);
+					swap_float32_into(&c[2], v->color.b);
+					swap_float32_into(&c[3], v->color.a);
+					c += 4;
+				}
+			}
+		}
+		else
+		{
+			for (i = 0; i < count; i++, n += 3)
+			{
+				const MGLVertex* v = &vb[indices[i]];
+
+				d_PackNormal3(n, v, context);
+				if (textured)
+				{
+					swap_float32_into(&t[0], v->v.u0);
+					swap_float32_into(&t[1], v->v.v0);
+					/* Unit 1's pair for a lit multitextured draw. The record
+					 * declares four components and the vertex shader reads this
+					 * pair at inputs 5 and 6. */
+					if (multitextured)
+					{
+						swap_float32_into(&t[2], v->v.u1);
+						swap_float32_into(&t[3], v->v.v1);
+						t += 4;
+					}
+					else
+						t += 2;
+				}
+				/* GL_COLOR_MATERIAL's own record, written last because it is
+				 * declared last. */
+				if (colormaterial)
+				{
+					swap_float32_into(&c[0], v->color.r);
+					swap_float32_into(&c[1], v->color.g);
+					swap_float32_into(&c[2], v->color.b);
+					swap_float32_into(&c[3], v->color.a);
+					c += 4;
+				}
+			}
+		}
+	}
+	else if (!texmat_on && (combined || smooth_alphatest))
 	{
 		FLOAT* t = texbuf;
 		FLOAT* t2 = texbuf2;
@@ -3687,7 +3678,12 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		 * is this pair, and the pair is a function of the two record
 		 * addresses alone. So one written for these records in this
 		 * generation and state_buf block is reused (texture cache fragpair). */
-		d_texcache_entry* pe = (combined && !fog && !smooth_point && tex0_entry != NULL &&
+		/* NOT for envblend: that shape's stream is this pair PLUS three
+		 * environment-colour words, so a cached address describing the pair
+		 * alone does not describe it. envadd reads no uniform of its own and
+		 * stays cacheable. */
+		d_texcache_entry* pe = (combined && !fog && !smooth_point && !env_blend &&
+		                        tex0_entry != NULL &&
 		                        tex0_entry->tex == bound_tex && tex0_entry->sb_start == sb->start &&
 		                        tex0_entry->ts_addr == textureShaderStateAddress &&
 		                        tex0_entry->ss_addr == textureSamplerStateAddress) ? tex0_entry : NULL;
@@ -3767,18 +3763,9 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 			D(("gl_EmitPrimitiveV3D: multitextured, texShaderState2=%08lx texSamplerState2=%08lx\n",
 			   (ULONG)textureShaderStateAddress2, (ULONG)textureSamplerStateAddress2));
 
-			/* Blend dst-factor flag, appended right after unit 1's TMU
-			 * config pair -- matching g_fragment_shader_multitexture_
-			 * {modulate,decal,replace}_blend_assembly's own read order
-			 * (ldunifrf.rf24 comes right after the two wrtmuc-consumed TMU
-			 * config pairs). Only written when multitex_blend is selected:
-			 * the non-blend variants never read a 5th uniform, so skipping
-			 * it for them is correct, not an oversight. */
-			if (multitex_blend)
-			{
-				FLOAT* bf = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb, sizeof(float), &backend->frame);
-				swap_float32_into(&bf[0], (context->backend.blend_dstmode == V3D_BLEND_FACTOR_SRCALPHA) ? 1.0f : 0.0f);
-			}
+			/* No 5th uniform here: only the software-blend variants read one
+			 * (ldunifrf.rf24, right after the two wrtmuc-consumed TMU config
+			 * pairs), and those are gone. The combine shaders stop at four. */
 		}
 		/* The plain textured+flat case dispatches to
 		 * FRAGMENT_TEXTURED_COLORMOD (see frag_code_offset's terminal
@@ -3801,13 +3788,39 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		 * What is excluded, and must stay excluded: `multitextured` feeds its
 		 * own colour, and `combined` and every smooth shape read colour from
 		 * a per-vertex varying. The untextured shapes take the else branch
-		 * below, which always writes these four words. */
-		if (!multitextured && !combined && !(smooth && !multitextured))
+		 * below, which always writes these four words.
+		 *
+		 * `lit` is excluded for the same reason as the smooth shapes -- a lit
+		 * draw's colour arrives as a varying -- and it has to be, because a
+		 * lit textured draw can carry an alpha test: under GL_FLAT neither
+		 * `combined` nor `smooth` is set, so without this term four unread
+		 * colour words would sit between the TMU configs and the threshold
+		 * and the shader would read red as its alpha reference. For a lit
+		 * textured draw WITHOUT alpha test the shader reads no uniforms past
+		 * the TMU pair, so dropping them changes nothing but the stream size. */
+		if (!multitextured && !combined && !(smooth && !multitextured) && !lit)
 		{
 			FLOAT* ca = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb, 4 * sizeof(float), &backend->frame);
 
+			/* GL_REPLACE and GL_DECAL: white, so the shader's multiply by this
+			 * colour is the identity and the texel passes through. These are
+			 * the words the COLORMOD shader and the flat fog and alpha-test
+			 * families all modulate by, which is why one substitution covers
+			 * every flat shape -- the same trick d_PackCombinedWhite plays per
+			 * vertex for a smooth draw.
+			 *
+			 * NOT memoized: s_colm's key is fixed_color, so white stored under
+			 * it would be served to a GL_MODULATE draw of the same colour.
+			 * Four constant words need no memo anyway. */
+			if (replace_white)
+			{
+				swap_float32_into(&ca[0], 1.0f);
+				swap_float32_into(&ca[1], 1.0f);
+				swap_float32_into(&ca[2], 1.0f);
+				swap_float32_into(&ca[3], 1.0f);
+			}
 			/* The words are memoized on fixed_color and FPCR (s_colm). */
-			if (d_ColorMemoCopy((ULONG*)ca, backend, sb->start, fpcr))
+			else if (d_ColorMemoCopy((ULONG*)ca, backend, sb->start, fpcr))
 			{
 			}
 			else
@@ -3818,6 +3831,24 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 			swap_float32_into(&ca[3], (float)((backend->fixed_color >> 24) & 0xFF) / 255.0f); /* alpha */
 			d_ColorMemoStore((const ULONG*)ca, backend, sb->start, fpcr);
 			}
+		}
+
+		/* GL_BLEND's environment colour, three words, red/green/blue in the same
+		 * order the four colour words above use -- so Cc's red pairs with the
+		 * texel half Cp's red does. Written for envblend ONLY: a word written
+		 * for a shader that does not read it desynchronises the stream, and
+		 * envadd reads none of its own.
+		 *
+		 * GL_BLEND's alpha is Ap * As, with no environment term, so the fourth
+		 * component is not written. */
+		if (env_blend)
+		{
+			FLOAT* ec = (FLOAT*)v3d_cl_claim_fast(&context->device, sm, sb,
+			                                       3 * sizeof(float), &backend->frame);
+
+			swap_float32_into(&ec[0], context->TexEnvColor[0][0]);
+			swap_float32_into(&ec[1], context->TexEnvColor[0][1]);
+			swap_float32_into(&ec[2], context->TexEnvColor[0][2]);
 		}
 	}
 	else
@@ -3910,7 +3941,13 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * config word, which is what the combined shaders read. The fog-only and
 	 * alphatest-only paths write only their own block, because the other
 	 * predicate is false. */
-	if (alphatest || smooth_alphatest)
+	/* The two smooth-shape sources are here for the same reason: their shaders
+	 * read the threshold with ldunifrf and consume the config word with the
+	 * same tlbu write. For the untextured smooth shapes the index works out
+	 * identically to the flat untextured one -- the smooth family's four
+	 * ldunifrf.rf24 reads step over the same four colour words the flat family
+	 * reads for real. */
+	if (alphatest || smooth_alphatest || smooth_untex_alphatest || lit_alphatest)
 	{
 		/* Two words: alpha_ref, plus a TLB config word for the passthrough
 		 * depth write.
@@ -3947,13 +3984,13 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	/* Smooth points: the point size, then the TLB config word for the disc
 	 * shaders' passthrough Z write -- the same word, for the same reason, as
 	 * the alphatest block above (which never runs together with this one).
-	 * The size is the one this pass rasterizes with: gl_EnsureDrawState sends
-	 * POINT_SIZE once per pass, later in this very function for a pass's
-	 * first draw, so before that it is still the live value. */
+	 * The live glPointSize is the right value because POINT_SIZE is emitted
+	 * per draw: the shader and the rasterizer therefore measure against the
+	 * same size, which a per-pass latch could not guarantee. */
 	if (smooth_point)
 	{
 		ULONG* pu = (ULONG*)v3d_cl_claim_fast(&context->device, sm, sb, 2 * sizeof(ULONG), &backend->frame);
-		swap_float32_into(&pu[0], backend->draw_state_configured ? s_pass_point_size : context->CurrentPointSize);
+		swap_float32_into(&pu[0], context->CurrentPointSize);
 		pu[1] = LE32(0xffffff84u);
 	}
 
@@ -3992,7 +4029,9 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	    s_vum.serial == g_mglv3d_combined_serial && s_vum.fpcr == fpcr &&
 	    s_vum.clip == (int)use_clip_space &&
 	    s_vum.sx == d_Bits(&context->sx) && s_vum.sy == d_Bits(&context->sy) &&
-	    s_vum.sz == d_Bits(&context->sz) && s_vum.az == d_Bits(&context->az))
+	    s_vum.sz == d_Bits(&context->sz) && s_vum.az == d_Bits(&context->az) &&
+	    s_vum.lit == (int)lit && s_vum.light_serial == context->LightSerial &&
+	    s_vum.light_mask == context->LightMask)
 	{
 		unif_vex_address = s_vum.vu;
 		unif_coord_address = s_vum.cu;
@@ -4002,7 +4041,14 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	scale_p = context->sx * 2.0f;
 	scale_p_y = context->sy * 2.0f;
 
-	vu = (v3d_my_uniforms*)v3d_cl_claim_fast(&context->device, sm, sb, sizeof(v3d_my_uniforms), &backend->frame);
+	/* ONE claim for the block AND the tail: the stream is positional, so they must
+	 * be contiguous, and a separate claim that grew state_buf would land in a new
+	 * block while unif_vex_address still pointed at the old. Unlit still claims 80. */
+	vu = (v3d_my_uniforms*)v3d_cl_claim_fast(&context->device, sm, sb,
+	                                          sizeof(v3d_my_uniforms)
+	                                            + (lit ? (colormaterial ? D_LIT_CM_TAIL_BYTES
+	                                                                    : D_LIT_TAIL_BYTES) : 0),
+	                                          &backend->frame);
 	unif_vex_address = (ULONG)vu;   /* from the claimed pointer -- see default_attr_values_address */
 	swap_float32_into(&vu->scale_p, scale_p);
 	swap_float32_into(&vu->scale_p_y, scale_p_y);
@@ -4045,6 +4091,140 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	swap_float32_into(&vu->z_scale, context->sz);
 	swap_float32_into(&vu->z_offset, context->az);
 
+	/* The lit tail, 35 floats in the order the shader reads them. The two z reads
+	 * above must stay the LAST before it or the tail's first word arrives as
+	 * z_scale.
+	 *
+	 * LIGHTING IS IN EYE SPACE. Object space is exact only where the modelview's
+	 * 3x3 is orthogonal times a uniform scale: the unnormalised dot is fine
+	 * either way, dot((M^-1)^T n, d) being dot(n, M^-1 d), but the divisor is
+	 * |n| where GL wants |(M^-1)^T n|, and the half-vector comes out as
+	 * normalize(L_obj + V_obj), which is not normalize(L + V) carried backwards.
+	 * The divergence runs to 62 grey levels of 255.
+	 *
+	 * So the shader gets the modelview and the normal matrix and does the work
+	 * per vertex. Two 4x4 matrices in the tail fit: the plain lit shaders are
+	 * 170 and 175 instructions of 256. */
+	if (lit)
+	{
+		FLOAT*  tail = (FLOAT*)(vu + 1);
+		GLfloat inv[16];
+		GLfloat it[9];
+		GLfloat lx, ly, lz, lw;
+		int     li = 0;
+		int     k;
+
+		/* First enabled light. The tail is compacted, so whichever light is on
+		 * lands in slot 0 -- the demo uses GL_LIGHT1 and never GL_LIGHT0. */
+		for (k = 0; k < MGL_MAX_LIGHTS; k++)
+		{
+			if (context->LightMask & (1U << k)) { li = k; break; }
+		}
+
+		/* The normal matrix: the 3x3 INVERSE-TRANSPOSE, so inv's upper 3x3 read
+		 * by COLUMNS. m_Invert4 is needed for this. */
+		if (m_Invert4(CurrentMV->v, inv))
+		{
+			const MGLLight* L = &context->Light[li];
+
+			/* The light is ALREADY in eye space: light.c transforms GL_POSITION by
+			 * the modelview in force when it is specified, which is GL's rule, so
+			 * it is taken as given. */
+			lx = L->Position[0];
+			ly = L->Position[1];
+			lz = L->Position[2];
+			lw = L->Position[3];
+
+			#define b(x) (inv[OF_##x])
+			it[0] = b(11); it[1] = b(21); it[2] = b(31);
+			it[3] = b(12); it[4] = b(22); it[5] = b(32);
+			it[6] = b(13); it[7] = b(23); it[8] = b(33);
+			#undef b
+
+			if (lw == 0.0f)
+			{
+				/* DIRECTIONAL. The shader has no branch -- the text assembler
+				 * rejects them -- and it always computes L = L_obj - P_obj, which
+				 * is only right for a point light. So a direction is passed as a
+				 * point very far along it: L = dir*K - P normalises back to dir,
+				 * and the shader needs no extra instruction on a variant that is
+				 * already exactly full.
+				 *
+				 * The error is bounded and below the output precision: the angle
+				 * error is |P|/K, so at K = 1e8 a vertex a thousand units from the
+				 * origin is off by 1e-5, against the 1/255 that eight bits can
+				 * show. |L|^2 reaches 1e16, far inside float range. */
+				const GLfloat K = 100000000.0f;
+				lx *= K; ly *= K; lz *= K;
+			}
+			else if (lw != 1.0f)
+			{
+				GLfloat r = 1.0f / lw;
+				lx *= r; ly *= r; lz *= r;
+			}
+		}
+		else
+		{
+			/* Singular modelview: -z and an identity normal matrix rather than
+			 * infinities in the tail. */
+			int q;
+			lx = 0.0f; ly = 0.0f; lz = 1.0f; lw = 0.0f;
+			for (q = 0; q < 9; q++)
+				it[q] = (q % 4 == 0) ? 1.0f : 0.0f;
+		}
+
+		/* Modelview rows 1..3, for P_eye. The fourth row is not read: the
+		 * shader needs only xyz of the eye position. */
+		#define a(x) (CurrentMV->v[OF_##x])
+		swap_float32_into(&tail[0],  a(11)); swap_float32_into(&tail[1],  a(12));
+		swap_float32_into(&tail[2],  a(13)); swap_float32_into(&tail[3],  a(14));
+		swap_float32_into(&tail[4],  a(21)); swap_float32_into(&tail[5],  a(22));
+		swap_float32_into(&tail[6],  a(23)); swap_float32_into(&tail[7],  a(24));
+		swap_float32_into(&tail[8],  a(31)); swap_float32_into(&tail[9],  a(32));
+		swap_float32_into(&tail[10], a(33)); swap_float32_into(&tail[11], a(34));
+		#undef a
+		for (k = 0; k < 9; k++)
+			swap_float32_into(&tail[12 + k], it[k]);
+		swap_float32_into(&tail[21], lx);
+		swap_float32_into(&tail[22], ly);
+		swap_float32_into(&tail[23], lz);
+		/* Shininess raw, not folded: the shader raises (N.H) to it via
+		 * exp2(s * log2(N.H)), so any value in GL's [0,128] works. */
+		swap_float32_into(&tail[24], context->Material.Shininess);
+		swap_float32_into(&tail[25], context->LitDiffuse[li][0]);
+		swap_float32_into(&tail[26], context->LitDiffuse[li][1]);
+		swap_float32_into(&tail[27], context->LitDiffuse[li][2]);
+		swap_float32_into(&tail[28], context->LitSpecular[li][0]);
+		swap_float32_into(&tail[29], context->LitSpecular[li][1]);
+		swap_float32_into(&tail[30], context->LitSpecular[li][2]);
+		swap_float32_into(&tail[31], context->LitBase[0]);
+		swap_float32_into(&tail[32], context->LitBase[1]);
+		swap_float32_into(&tail[33], context->LitBase[2]);
+		swap_float32_into(&tail[34], context->LitBase[3]);
+
+		/* GL_COLOR_MATERIAL's K1 half. Zero for every term the vertex colour
+		 * does not replace, so a shader reading these on a draw whose mode
+		 * tracks nothing computes exactly what the plain tail gives. */
+		if (colormaterial)
+		{
+			/* GROUPED BY CHANNEL, three words each -- base, diffuse,
+			 * specular -- which is what the shaders read: one scratch
+			 * register carries k = base + diffuse*N.L + specular*spec per
+			 * channel. Writing them grouped by COMPONENT instead put
+			 * BaseC_g where the shader wanted DiffC_r. */
+			swap_float32_into(&tail[35], context->LitBaseC[0]);
+			swap_float32_into(&tail[36], context->LitDiffuseC[li][0]);
+			swap_float32_into(&tail[37], context->LitSpecularC[li][0]);
+			swap_float32_into(&tail[38], context->LitBaseC[1]);
+			swap_float32_into(&tail[39], context->LitDiffuseC[li][1]);
+			swap_float32_into(&tail[40], context->LitSpecularC[li][1]);
+			swap_float32_into(&tail[41], context->LitBaseC[2]);
+			swap_float32_into(&tail[42], context->LitDiffuseC[li][2]);
+			swap_float32_into(&tail[43], context->LitSpecularC[li][2]);
+			swap_float32_into(&tail[44], context->LitBaseC[3]);
+		}
+	}
+
 	cu = (v3d_my_uniforms*)v3d_cl_claim_fast(&context->device, sm, sb, sizeof(v3d_my_uniforms), &backend->frame);
 	unif_coord_address = (ULONG)cu;   /* from the claimed pointer -- see default_attr_values_address */
 	*cu = *vu;
@@ -4056,6 +4236,9 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		s_vum.vu       = unif_vex_address;
 		s_vum.cu       = unif_coord_address;
 		s_vum.serial   = g_mglv3d_combined_serial;
+		s_vum.lit          = (int)lit;
+		s_vum.light_serial = context->LightSerial;
+		s_vum.light_mask   = context->LightMask;
 		s_vum.fpcr     = fpcr;
 		s_vum.clip     = (int)use_clip_space;
 		s_vum.sx       = d_Bits(&context->sx);
@@ -4108,13 +4291,27 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	 * vertex/fragment pair (4096/5120) instead of the multitexture pair
 	 * (12288/13312), feeding multitextured attribute data to a shader
 	 * compiled for smooth's completely different varying semantics. */
-	vex_code_offset = (clipspace_combined || real_w_combined) ? 16384 :
-	                   (clipspace_multitextured ? 17408 :
-	                   ((combined || smooth_alphatest) ? 6144 : ((smooth && !multitextured) ? 4096 : (multitextured ? 12288 : 0))));
-	/* multitextured's own frag_code_offset is a 6-way dispatch: multitex_env
-	 * selects the combine mode, multitex_blend selects between the plain and
-	 * blend-aware variant of whichever combine mode. See
-	 * v3d_shader_assembler.h's own comment on those enum entries. */
+	/* LIT ARM FIRST. It is safe there precisely because the lit predicate above
+	 * excludes every shape the arms below claim -- clip space, real w and
+	 * multitexture among them -- so putting it first perturbs no existing arm
+	 * while guaranteeing a lit draw cannot be swallowed by one. 90112 and 91136
+	 * are the reclaimed slots 88 and 89 (v3d_assembler.c). */
+	/* A lit real-w draw is necessarily textured, so this arm needs no
+	 * textured test -- see the lit predicate above for why. */
+	/* COLOUR MATERIAL FIRST INSIDE THE LIT ARM: it is a twin of each shape
+	 * below, not a shape of its own, so it has to be tested before the shape
+	 * it twins. 87..90 are the colour-material versions of 64, 65, 84 and 85,
+	 * in that order. */
+	vex_code_offset = lit ? (colormaterial
+	                           ? (multitextured ? 90 :
+	                              (needs_real_w ? 89 : (textured ? 88 : 87)))
+	                           : (multitextured ? 85 :
+	                              (needs_real_w ? 84 : (textured ? 65 : 64)))) :
+	                  ((clipspace_combined || real_w_combined) ? 14 :
+	                   (clipspace_multitextured ? 15 :
+	                   ((combined || smooth_alphatest) ? 5 : ((smooth && !multitextured) ? 3 : (multitextured ? 11 : 0)))));
+	/* multitextured's own frag_code_offset is a 3-way dispatch on multitex_env,
+	 * which selects the combine mode. */
 	/* SMOOTH FOG ARMS FIRST. smooth_alphatest and combined are the first two
 	 * shape arms of the chain below, so a fogged smooth draw would be
 	 * swallowed by them and lose its fog. Both of those require textured, so
@@ -4122,32 +4319,84 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	/* Smooth points first: their predicate already excludes fog, alpha test
 	 * and multitexture, so each maps onto exactly one base shape below --
 	 * combined (7168), the smooth untextured arm (5120), the textured
-	 * terminal arm (32768) or the untextured one (2048) -- and takes that
+	 * terminal arm (shader 32) or the untextured one (shader 2) -- and takes that
 	 * shape's disc shader instead. */
-	frag_code_offset = smooth_point ? (textured ? (smooth ? 115712 : 114688) : (smooth ? 113664 : 112640)) :
+	/* LIT ARM FIRST here too, and it maps onto the EXISTING smooth fragment
+	 * shaders rather than needing lit ones: a fragment shader only consumes
+	 * already-interpolated varyings and cannot tell how the colour on them was
+	 * produced. Textured takes the combined pair's fragment half (shader 6,
+	 * GL_MODULATE = texel x lit colour, which is exactly GL's lit-textured
+	 * semantics); untextured takes the smooth one (shader 4).
+	 *
+	 * AND THE SMOOTH-FOG ONE (shader 52) WHEN UNTEXTURED AND FOGGED, which is
+	 * the whole of lit+fog: fog is entirely fragment-side -- its factor comes
+	 * from rf0, the fragment's own interpolated w, and its uniforms ride the
+	 * FRAGMENT stream while the lit tail extends only the vertex block. So the
+	 * two compose with no new shader, exactly as the paragraph above says. The
+	 * untextured branch writes its four fixed-colour words whatever `lit` is,
+	 * which matters because that shader's ldunifrf sequence consumes them
+	 * before reaching the fog values.
+	 *
+	 * TEXTURED lit+fog is still refused by `lit` itself: its partner would be
+	 * the combined pair's fragment half, whose uniform stream is laid out
+	 * differently, and that has not been verified.
+	 *
+	 * NOT keyed on `smooth`, for the same reason the varying count above is not
+	 * -- see d_BuildShaderRecord.
+	 *
+	 * AND ITS ALPHA TEST COMES FIRST WITHIN THE LIT ARM, because the shape
+	 * arms below pick flat families off `smooth`, which a lit draw must never
+	 * take. lit_alphatest_code_offset has already made the textured/untextured
+	 * and fog choices, so there is nothing left to decide here.
+	 *
+	 * The untextured smooth alphatest arm sits ahead of every fog arm for the
+	 * usual reason: its own offset already encodes fog, and the catch-all
+	 * fogged-smooth-untextured arm further down would otherwise swallow it and
+	 * drop the alpha test. The plain smooth arm below would swallow the
+	 * unfogged one the same way. */
+	/* SMOOTH POINTS FIRST INSIDE THE LIT ARM, and on the SMOOTH disc shaders
+	 * (69/67) whatever the shade model, for the same reason this arm ignores
+	 * `smooth` throughout: a lit draw's colour arrives as a varying. Those two
+	 * read one uniform, the point size, and consume the TLB config -- the whole
+	 * of what the smooth_point block writes. The flat discs 68/66 would read
+	 * four colour words that a lit draw does not write. smooth_point's own
+	 * predicate excludes fog and alpha test, so this arm competes with
+	 * nothing below it. */
+	/* MULTITEXTURE FIRST INSIDE THE LIT ARM. A multitextured draw is also
+	 * `textured`, and lit_alphatest does not exclude it, so without this the
+	 * arms below would hand it a single-texture shader. Its alpha test is
+	 * dropped, as it already is for an unlit multitextured draw -- no
+	 * multitexture alphatest variant exists for either. */
+	/* THE ENVIRONMENT ARM, ahead of everything: 93/94 for a combined draw and
+	 * 91/92 for the flat one. False for every draw in every game, so the chain
+	 * below is reached through a single comparison. */
+	frag_code_offset = (env_add || env_blend)
+	                   ? (combined ? (env_add ? 93 : 94) : (env_add ? 91 : 92)) :
+	                   lit ? (multitextured ? 86 :
+	                          smooth_point ? (textured ? 69 : 67) :
+	                          lit_alphatest ? lit_alphatest_code_offset :
+	                          (textured ? (fog ? 53 : 6) : (fog ? 52 : 4))) :
+	                   smooth_point ? (textured ? (smooth ? 69 : 68) : (smooth ? 67 : 66)) :
+	                    smooth_untex_alphatest ? smooth_untex_alphatest_code_offset :
 	                    (fog && smooth_alphatest) ? smooth_fog_alphatest_code_offset :
-	                    ((fog && combined) ? 78848 :
-	                    ((fog && multitex_blend) ?
-	                        (multitex_env == 1 ? 102400 : (multitex_env == 2 ? 103424 : 101376)) :
+	                    ((fog && combined) ? 53 :
 	                    /* LAST of the fog arms, deliberately. This is the catch-all
 	                     * for fogged smooth draws, and it shadows anything placed
 	                     * below it, so keeping it last is structural rather than
 	                     * another exclusion list to forget. */
-	                    ((fog && smooth && !multitextured && !textured) ? 77824 :
+	                    ((fog && smooth && !multitextured && !textured) ? 52 :
 	                    (smooth_alphatest ? smooth_alphatest_code_offset :
-	                    (combined ? 7168 :
-	                    ((smooth && !multitextured) ? 5120 :
+	                    (combined ? 6 :
+	                    ((smooth && !multitextured) ? 4 :
 	                    /* Multitexture fog arm ahead of the plain multitexture
 	                     * arm, for the same reason the smooth fog arms lead the
 	                     * chain: otherwise the arm below swallows the draw and
 	                     * the fog is silently dropped. Only the non-blending env
-	                     * modes reach it -- the (fog && multitex_blend) arm
-	                     * higher up has already taken the blending ones. */
+	                     * modes reach it. */
 	                    ((fog && multitextured) ?
-	                        (multitex_env == 1 ? 88064 : (multitex_env == 2 ? 89088 : 87040)) :
-	                    (multitextured ? (multitex_blend ?
-	                        (multitex_env == 1 ? 21504 : (multitex_env == 2 ? 22528 : 20480)) :
-	                        (multitex_env == 1 ? 18432 : (multitex_env == 2 ? 19456 : 13312))) :
+	                        (multitex_env == 1 ? 62 : (multitex_env == 2 ? 63 : 61)) :
+	                    (multitextured ?
+	                        (multitex_env == 1 ? 16 : (multitex_env == 2 ? 17 : 12)) :
 	                    /* Combined arm FIRST: it must be tested ahead of both
 	                     * single-feature arms, or the `alphatest` arm below would
 	                     * swallow the case and drop the fog. fog_alphatest_code_offset
@@ -4155,16 +4404,15 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	                     * here. */
 	                    ((fog && alphatest) ? fog_alphatest_code_offset :
 	                    (alphatest ? alphatest_code_offset :
-	                    (fog ? (textured ? 10240 : 8192) :
+	                    (fog ? (textured ? 9 : 7) :
 	                    /* The terminal case is "textured, flat-shaded,
 	                     * nothing else active". It dispatches to
-	                     * FRAGMENT_TEXTURED_COLORMOD (32768), which
-	                     * multiplies the texture sample by a per-draw
-	                     * uniform colour rather than emitting the texel
-	                     * unmodulated -- see the four-word colour feed
-	                     * written for it in the textured uniform block
-	                     * above. */
-	                    (textured ? 32768 : 2048))))))))))));
+	                     * FRAGMENT_TEXTURED_COLORMOD, which multiplies the
+	                     * texture sample by a per-draw uniform colour rather
+	                     * than emitting the texel unmodulated -- see the
+	                     * four-word colour feed written for it in the
+	                     * textured uniform block above. */
+	                    (textured ? 20 : 2)))))))))));
 
 
 	/* The record and its attribute records in ONE claim: a copy of the
@@ -4180,10 +4428,26 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		              (textured         ? D_SR_TEXTURED         : 0) |
 		              (alphatest        ? D_SR_ALPHATEST        : 0) |
 		              (smooth_point     ? D_SR_SMOOTH_POINT     : 0) |
-		              (multitex_blend   ? D_SR_MULTITEX_BLEND   : 0) |
-		              (needs_real_w     ? D_SR_NEEDS_REAL_W     : 0);
+		              (needs_real_w     ? D_SR_NEEDS_REAL_W     : 0) |
+		              (lit              ? D_SR_LIT              : 0) |
+		              (colormaterial    ? D_SR_COLORMATERIAL    : 0) |
+		              ((smooth_untex_alphatest || lit_alphatest) ?
+		                                  D_SR_SMOOTH_SHAPE_ALPHATEST : 0);
+		/* A lit TEXTURED draw is the third three-record shape, alongside combined
+		 * and smooth_alphatest: position, s/t, normal. Lit untextured has two,
+		 * position and normal, which is the same count as the default arm.
+		 *
+		 * GL_COLOR_MATERIAL adds one to whichever it is -- a third record for a
+		 * lit untextured draw, a FOURTH for a lit textured one, which is the only
+		 * shape in the driver that has four. This expression is repeated by the
+		 * rec[] patch below and by d_glShaderState's argument, and all three must
+		 * agree. */
+		ULONG nrec   = (ULONG)(2
+		                + ((combined || smooth_alphatest || (lit && textured)
+		                    || (lit && colormaterial)) ? 1 : 0)
+		                + ((lit && textured && colormaterial) ? 1 : 0));
 		ULONG nwords = (sizeof(v3d_gl_shader_state_record) +
-		                ((combined || smooth_alphatest) ? 3 : 2) * sizeof(v3d_gl_shader_state_attribute_record)) / 4;
+		                nrec * sizeof(v3d_gl_shader_state_attribute_record)) / 4;
 		ULONG* rec;
 		ULONG w;
 
@@ -4195,7 +4459,7 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 			for (w = 0; w < D_SR_MAXWORDS; w++)
 				s_srec_tpl[w] = 0;
 			d_BuildShaderRecord(backend, (v3d_u8*)s_srec_tpl, shape, frag_code_offset, vex_code_offset,
-			                    0, 0, 0, 0, NULL, NULL, NULL);
+			                    0, 0, 0, 0, NULL, NULL, NULL, NULL);
 			s_srec.gen              = g_v3d_cl_generation;
 			s_srec.sb_start         = sb->start;
 			s_srec.code_base        = backend->shader_code_mem.hostptr;
@@ -4220,6 +4484,11 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 		rec[13] = LE32((ULONG)texbuf);
 		if (nwords > 17)
 			rec[17] = LE32((ULONG)texbuf2);
+		/* The fourth record's address. Only lit + textured + colour material
+		 * reaches four records; a lit UNTEXTURED colour-material draw carries
+		 * the colour in texbuf2 and is patched by the line above. */
+		if (nwords > 21)
+			rec[21] = LE32((ULONG)colbuf);
 
 	}
 
@@ -4325,12 +4594,14 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 
 		gl_EmitCullBlendState(context, smooth, multitextured, textured, multitex_env, vp_sx, vp_sy, vp_ax, vp_ay);
 	}
-	/* `combined` and `smooth_alphatest` write THREE attribute records
-	 * (posbuf, texbuf, texbuf2); every other shape writes exactly two
-	 * (posbuf + texbuf). d_glShaderState below must be told the right
-	 * number, or the hardware never consumes texbuf2 as part of this draw
-	 * call's attribute list and the alignment of whatever follows is
-	 * corrupted. See texbuf2's own allocation comment for the layout. */
+	/* `combined`, `smooth_alphatest` and a lit TEXTURED draw write THREE
+	 * attribute records (posbuf, texbuf, texbuf2 -- texbuf2 being the normal in
+	 * the lit case); every other shape writes exactly two (posbuf + texbuf, the
+	 * latter being the normal for a lit untextured draw). d_glShaderState below
+	 * must be told the right number, or the hardware never consumes the third
+	 * record as part of this draw call's attribute list and the alignment of
+	 * whatever follows is corrupted. See texbuf2's own allocation comment for the
+	 * layout. This count and `nwords` above must always agree. */
 
 	/* If state_buf grew anywhere between capturing unif_frag_address and
 	 * here, that address is stale -- this draw's
@@ -4405,7 +4676,11 @@ static void gl_EmitPrimitiveV3DEx(GLcontext context, int* indices, int count, UB
 	if (multitextured)
 		bound_tex2->last_draw_frame = (v3d_u32)g_mglv3d_frame_number;
 
-	d_glShaderState(backend, staterecordAddress, (combined || smooth_alphatest) ? 3 : 2);
+	d_glShaderState(backend, staterecordAddress,
+	                (ULONG)(2
+	                 + ((combined || smooth_alphatest || (lit && textured)
+	                     || (lit && colormaterial)) ? 1 : 0)
+	                 + ((lit && textured && colormaterial) ? 1 : 0)));
 
 	/*
 	 * chunk_size lets one shared attribute buffer and one shader state
@@ -4559,6 +4834,9 @@ void d_DrawTriangles(GLcontext context)
 {
 	int count;
 
+	if (WIREFRAME_WANTED(context)) { d_DrawWireframe(context, GL_TRIANGLES); return; }
+
+
 	D(("d_DrawTriangles: entry, VertexBufferPointer=%ld CullFace_State=%ld\n",
 	   (LONG)context->VertexBufferPointer, (LONG)context->CullFace_State));
 
@@ -4621,6 +4899,12 @@ void d_DrawTrianglesLocked(GLcontext context, int nidx, GLenum type, const GLvoi
 
 	if (context->CullFace_State == GL_TRUE && context->CurrentCullFace == GL_FRONT_AND_BACK)
 		return;
+
+	if (WIREFRAME_WANTED(context))
+	{
+		d_DrawWireframeLocked(context, nidx, type, indices, first);
+		return;
+	}
 
 	v_EnsureTransformState(context);
 	d_FrameBegin(context);
@@ -4692,6 +4976,321 @@ void d_DrawLines(GLcontext context)
 	D(("d_DrawLines: emitting batch of %ld unclipped lines (%ld vertices)\n",
 	   (LONG)(count/2), (LONG)count));
 	gl_EmitPrimitiveV3D(context, s_seq, count, V3D_PRIM_LINES, GL_FALSE, count);
+}
+
+/*
+ * glPolygonMode GL_LINE / GL_POINT, decomposed on the CPU.
+ *
+ * WHY NOT THE HARDWARE. V3D's CFG_BITS carry
+ * direct3d_wireframe_triangles_mode, and MESA drives it straight from
+ * glPolygonMode -- but V3D has NO quad or polygon primitive, so a quad or a
+ * GL_POLYGON is triangulated before it is rasterized and that bit outlines
+ * every TRIANGLE edge. GL draws a polygon's BOUNDARY edges and says the ones a
+ * triangulation invented must not appear. With the bit set, a quad, a strip and
+ * a fan each show their diagonal. Only GL_TRIANGLES is correct that way. MESA
+ * reaches conformance the same way this does, in draw_pipe_unfilled.c:
+ * decompose, and emit an edge only where the triangulation marked a boundary.
+ *
+ * STRUCTURE. Each primitive is walked a TRIANGLE at a time, and each triangle
+ * says which of its three edges are real boundary edges -- the equivalent of
+ * MESA's DRAW_PIPE_EDGE_FLAG_n, and it belongs to the decomposition, not to the
+ * vertex, so it costs no MGLVertex field and breaks no client ABI. Facing is
+ * decided per triangle at the same point, because the edges are emitted as
+ * V3D_PRIM_LINES and a line carries no winding for the hardware to cull by.
+ *
+ * glEdgeFlag is still NOT honoured: that one IS per vertex and would need the
+ * MGLVertex field. GL's default is GL_TRUE, every edge a boundary, so a program
+ * that never sets edge flags sees exactly what GL specifies.
+ */
+static int *s_wire = NULL;
+static int  s_wire_pairs = 0;
+
+void d_FreeWire(void)
+{
+	if (s_wire)
+		free(s_wire);
+	s_wire = NULL;
+	s_wire_pairs = 0;
+}
+
+/* Room for `pairs` edges of two indices each; grown and kept, like s_seq. */
+static int *d_WireRoom(int pairs)
+{
+	if (pairs > s_wire_pairs)
+	{
+		int *p = (int *)realloc(s_wire, sizeof(int) * 2 * pairs);
+		if (!p)
+			return NULL;
+		s_wire = p;
+		s_wire_pairs = pairs;
+	}
+	return s_wire;
+}
+
+/*
+ * GL_POINT mode, from the very same decomposition GL_LINE uses. GL 1.1 3.5.4
+ * draws a point at each vertex that BEGINS a boundary edge, so the edge list
+ * already is the answer -- take the first index of every pair, in place. A
+ * closed polygon begins exactly one boundary edge per boundary vertex, so no
+ * deduplication is needed, and the facing decision and the suppressed
+ * triangulation diagonals both come along from d_BuildWireIndices.
+ */
+static int d_WireEdgesToPoints(int count)
+{
+	int i, n = 0;
+
+	for (i = 0; i < count; i += 2)
+		s_wire[n++] = s_wire[i];
+
+	return n;
+}
+
+/*
+ * Is this triangle culled? The hardware normally answers this from the winding
+ * of a TRIANGLE primitive, which the line batch below is not, so it is
+ * answered here instead -- three vertices through CombinedMatrix (the same
+ * ModelView*Projection the vertex shader is handed) and the sign of the
+ * projected area. Three transforms per triangle, on wireframe draws only.
+ *
+ * Conservative: a vertex at or behind the eye plane makes the projected winding
+ * meaningless, so the triangle is KEPT rather than culled on a bad sign.
+ */
+static GLboolean d_WireCulled(GLcontext context, int ia, int ib, int ic)
+{
+	const GLfloat *m = context->CombinedMatrix.v;
+	const MGLVertex *vb = context->VertexBuffer;
+	float px[3], py[3], pw[3];
+	float area;
+	int k, idx[3];
+
+	if (context->CullFace_State != GL_TRUE)
+		return GL_FALSE;
+	if (context->CurrentCullFace == GL_FRONT_AND_BACK)
+		return GL_TRUE;
+
+	idx[0] = ia; idx[1] = ib; idx[2] = ic;
+	for (k = 0; k < 3; k++)
+	{
+		const MGLVertex *v = &vb[idx[k]];
+
+		px[k] = v->v.x*m[OF_11] + v->v.y*m[OF_12] + v->v.z*m[OF_13] + v->v.w*m[OF_14];
+		py[k] = v->v.x*m[OF_21] + v->v.y*m[OF_22] + v->v.z*m[OF_23] + v->v.w*m[OF_24];
+		pw[k] = v->v.x*m[OF_41] + v->v.y*m[OF_42] + v->v.z*m[OF_43] + v->v.w*m[OF_44];
+
+		if (pw[k] <= 0.0f)
+			return GL_FALSE;
+	}
+
+	for (k = 0; k < 3; k++)
+	{
+		px[k] /= pw[k];
+		py[k] /= pw[k];
+	}
+
+	area = (px[1] - px[0]) * (py[2] - py[0]) - (px[2] - px[0]) * (py[1] - py[0]);
+	if (area == 0.0f)
+		return GL_FALSE;
+
+	if ((context->CurrentFrontFace == GL_CCW) ? (area > 0.0f) : (area < 0.0f))
+		return (context->CurrentCullFace == GL_FRONT) ? GL_TRUE : GL_FALSE;
+
+	return (context->CurrentCullFace == GL_BACK) ? GL_TRUE : GL_FALSE;
+}
+
+#define WIRE_EDGE(a,b) do { e[w*2] = (a); e[w*2+1] = (b); w++; } while (0)
+
+/*
+ * One triangle's contribution: its three edges, each emitted only if the
+ * decomposition marked it a boundary AND the triangle survives culling.
+ */
+#define WIRE_TRI(a,b,c,e0,e1,e2)                                   \
+	do {                                                           \
+		if (!d_WireCulled(context, (a), (b), (c)))                 \
+		{                                                          \
+			if (e0) WIRE_EDGE((a), (b));                           \
+			if (e1) WIRE_EDGE((b), (c));                           \
+			if (e2) WIRE_EDGE((c), (a));                           \
+		}                                                          \
+	} while (0)
+
+/* Returns the index COUNT (pairs * 2). No primitive yields more than one edge
+ * per vertex once interior edges are dropped, plus a few for the closing ones.
+ * `prim` is passed rather than read from CurrentPrimitive, which
+ * GLDrawArrays/GLDrawElements never set. */
+static int d_BuildWireIndices(GLcontext context, int prim, int n)
+{
+	int *e;
+	int  i, w = 0;
+
+	e = d_WireRoom(n + 8);
+	if (!e)
+		return 0;
+
+	switch (prim)
+	{
+		case GL_TRIANGLES:
+			/* Independent: every edge is a boundary edge. */
+			for (i = 0; i + 2 < n; i += 3)
+				WIRE_TRI(i, i+1, i+2, 1, 1, 1);
+			break;
+
+		case GL_QUADS:
+			/* Each quad is its own 2-triangle fan; the spoke (i, i+2) is
+			 * interior and belongs to neither triangle's boundary. */
+			for (i = 0; i + 3 < n; i += 4)
+			{
+				WIRE_TRI(i,   i+1, i+2, 1, 1, 0);
+				WIRE_TRI(i,   i+2, i+3, 0, 1, 1);
+			}
+			break;
+
+		case GL_TRIANGLE_STRIP:
+			/* Triangle k is (k, k+1, k+2). It shares (k+1, k+2) with the
+			 * next, so that edge is boundary only on the LAST triangle, and
+			 * (k, k+1) only on the first. The rung (k+2, k) always is. */
+			for (i = 0; i + 2 < n; i++)
+				WIRE_TRI(i, i+1, i+2, (i == 0), (i + 3 >= n), 1);
+			break;
+
+		case GL_TRIANGLE_FAN:
+		case GL_POLYGON:
+			/* Triangle k is (0, k+1, k+2). The spokes (0, k+1) are interior
+			 * except the first, and (k+2, 0) except on the last triangle;
+			 * the rim (k+1, k+2) always is. For GL_POLYGON that leaves
+			 * exactly the polygon's own perimeter. */
+			for (i = 0; i + 2 < n; i++)
+				WIRE_TRI(0, i+1, i+2, (i == 0), 1, (i + 3 >= n));
+			break;
+
+		case GL_QUAD_STRIP:
+		{
+			/* Quad k is (2k, 2k+1, 2k+3, 2k+2) in perimeter order and shares
+			 * the rung (2k+2, 2k+3) with the next, so only the two end rungs
+			 * and the sides survive. */
+			int m = n & ~1;                 /* whole vertex pairs only */
+
+			for (i = 0; i + 3 < m; i += 2)
+			{
+				WIRE_TRI(i,   i+1, i+3, (i == 0), 1, 0);
+				WIRE_TRI(i,   i+3, i+2, 0, (i + 4 >= m), 1);
+			}
+			break;
+		}
+
+		default:
+			return 0;
+	}
+
+	return w * 2;
+}
+
+/*
+ * The LOCKED/indexed path's wireframe. A client application draws its world surfaces this
+ * way -- glLockArrays plus an index list per texture and lightmap -- so without
+ * this, gl_wireframe changes nothing on screen except the few surfaces that
+ * take another route. Found exactly that way: the world stayed solid and only
+ * the water looked different.
+ *
+ * Always GL_TRIANGLES here, so every edge is a boundary edge and there is no
+ * triangulation to see through; the work is reading the caller's index array
+ * rather than assuming 0..n-1. Facing is still decided per triangle, since
+ * these go out as lines too.
+ */
+static int d_WireIndexAt(GLenum type, const GLvoid *indices, int i)
+{
+	switch (type)
+	{
+		case GL_UNSIGNED_BYTE:  return (int)((const GLubyte  *)indices)[i];
+		case GL_UNSIGNED_SHORT: return (int)((const GLushort *)indices)[i];
+		case GL_UNSIGNED_INT:
+		default:                return (int)((const GLuint   *)indices)[i];
+	}
+}
+
+static void d_DrawWireframeLocked(GLcontext context, int nidx, GLenum type,
+                                  const GLvoid *indices, int first)
+{
+	int *e;
+	int  i, w = 0;
+
+	if (nidx < 3)
+		return;
+
+	e = d_WireRoom(nidx + 8);
+	if (!e)
+		return;
+
+	v_EnsureTransformState(context);
+	d_FrameBegin(context);
+
+	for (i = 0; i + 2 < nidx; i += 3)
+	{
+		int a = d_WireIndexAt(type, indices, first + i);
+		int b = d_WireIndexAt(type, indices, first + i + 1);
+		int c = d_WireIndexAt(type, indices, first + i + 2);
+
+		if (d_WireCulled(context, a, b, c))
+			continue;
+
+		WIRE_EDGE(a, b);
+		WIRE_EDGE(b, c);
+		WIRE_EDGE(c, a);
+	}
+
+	if (w == 0)
+		return;
+
+	if (context->CurPolygonMode == GL_POINT)
+	{
+		int np = d_WireEdgesToPoints(w * 2);
+		D(("d_DrawWireframeLocked: emitting %ld boundary points\n", (LONG)np));
+		gl_EmitPrimitiveV3D(context, s_wire, np, V3D_PRIM_POINTS, GL_FALSE, np);
+		return;
+	}
+
+	D(("d_DrawWireframeLocked: emitting %ld boundary edges\n", (LONG)w));
+	gl_EmitPrimitiveV3D(context, s_wire, w * 2, V3D_PRIM_LINES, GL_FALSE, w * 2);
+}
+
+/*
+ * Entered from the top of each polygon d_Draw*, which passes its own primitive
+ * -- so immediate mode, the array paths and a display-list replay all reach it,
+ * and a replayed list picks up the polygon mode in force at REPLAY time, as GL
+ * requires, rather than the one captured with it.
+ */
+void d_DrawWireframe(GLcontext context, int prim)
+{
+	int count;
+
+	D(("d_DrawWireframe: entry, prim=%ld VertexBufferPointer=%ld\n",
+	   (LONG)prim, (LONG)context->VertexBufferPointer));
+
+	if (context->VertexBufferPointer < 2)
+		return;
+
+	if (context->CullFace_State == GL_TRUE && context->CurrentCullFace == GL_FRONT_AND_BACK)
+		return;
+
+	/* Same preamble as d_DrawLines -- see d_DrawTriangles' comment for what
+	 * v_EnsureTransformState covers. */
+	v_EnsureTransformState(context);
+
+	d_FrameBegin(context);
+
+	count = d_BuildWireIndices(context, prim, d_SeqCount(context));
+	if (count < 2)
+		return;
+
+	if (context->CurPolygonMode == GL_POINT)
+	{
+		count = d_WireEdgesToPoints(count);
+		D(("d_DrawWireframe: emitting %ld boundary points\n", (LONG)count));
+		gl_EmitPrimitiveV3D(context, s_wire, count, V3D_PRIM_POINTS, GL_FALSE, count);
+		return;
+	}
+
+	D(("d_DrawWireframe: emitting %ld boundary edges\n", (LONG)(count/2)));
+	gl_EmitPrimitiveV3D(context, s_wire, count, V3D_PRIM_LINES, GL_FALSE, count);
 }
 
 /*
@@ -4778,6 +5377,10 @@ void d_DrawTriangleFan(GLcontext context)
 	int i;
 	int count;
 
+	/* GL_POLYGON and MGL_FLATFAN route here too and share the fan case. */
+	if (WIREFRAME_WANTED(context)) { d_DrawWireframe(context, GL_TRIANGLE_FAN); return; }
+
+
 	if (trace) s_trace_calls++;
 
 	D(("d_DrawTriangleFan: entry, VertexBufferPointer=%ld\n", (LONG)context->VertexBufferPointer));
@@ -4845,6 +5448,9 @@ void d_DrawTriangleFan(GLcontext context)
 void d_DrawTriangleStrip(GLcontext context)
 {
 	int count;
+
+	if (WIREFRAME_WANTED(context)) { d_DrawWireframe(context, GL_TRIANGLE_STRIP); return; }
+
 
 	D(("d_DrawTriangleStrip: entry, VertexBufferPointer=%ld\n", (LONG)context->VertexBufferPointer));
 
@@ -4918,6 +5524,11 @@ void d_DrawTriangleStrip(GLcontext context)
 void d_DrawQuads(GLcontext context)
 {
 	int i, k;
+	/* Vertex count, clamped through d_SeqCount like the other eight d_Draw*
+	 * functions, which gives GL_QUADS its clamp against s_seq_size. GLVertex4f
+	 * bound-checks too, so this is the second line of defence rather than the
+	 * only one, and the count is read once here rather than per iteration. */
+	const int d_vcount = d_SeqCount(context);
 	/* Same multi-color batching as d_DrawQuadStrip: one shared batch has
 	 * room for only ONE flat color, so GL_QUADS blocks that change glColor
 	 * between quads need several slots. See d_DrawQuadStrip's own comment. */
@@ -4925,6 +5536,9 @@ void d_DrawQuads(GLcontext context)
 	int color_batch_count[MAX_COLOR_BATCHES];
 	v3d_u32 color_batch_color[MAX_COLOR_BATCHES];
 	int num_active_batches = 0;
+
+	if (WIREFRAME_WANTED(context)) { d_DrawWireframe(context, GL_QUADS); return; }
+
 
 	for (k = 0; k < MAX_COLOR_BATCHES; k++)
 		color_batch_count[k] = 0;
@@ -4952,7 +5566,7 @@ void d_DrawQuads(GLcontext context)
 
 	/* Whole quads only: a trailing one, two or three vertices draw
 	 * nothing. */
-	for (i=0; i+3<context->VertexBufferPointer; i+=4)
+	for (i=0; i+3<d_vcount; i+=4)
 	{
 		PrepTexCoords(context, i, 4, GL_FALSE);
 
@@ -4980,12 +5594,25 @@ void d_DrawQuads(GLcontext context)
 				|  (v3d_u32)(pv->color.r * 255.0f);
 			int slot = -1;
 
-			for (k = 0; k < num_active_batches; k++)
+			/* SMOOTH: the colour travels per VERTEX (d_PackSmooth /
+			 * d_PackCombined) and fixed_color is never read, so splitting on
+			 * the provoking vertex costs an attribute buffer and a shader
+			 * state record per distinct colour and buys nothing. One batch
+			 * takes them all. Quads stay independent primitives either way --
+			 * chunk_size is 4 below. */
+			if (context->ShadeModel == GL_SMOOTH)
 			{
-				if (color_batch_color[k] == quadColor)
+				slot = (num_active_batches > 0) ? 0 : -1;
+			}
+			else
+			{
+				for (k = 0; k < num_active_batches; k++)
 				{
-					slot = k;
-					break;
+					if (color_batch_color[k] == quadColor)
+					{
+						slot = k;
+						break;
+					}
 				}
 			}
 
@@ -5039,6 +5666,9 @@ void d_DrawQuads(GLcontext context)
 void d_DrawQuadStrip(GLcontext context)
 {
 	int i, k;
+	/* Clamped vertex count, same reasoning as d_DrawQuads: the count goes
+	 * through d_SeqCount rather than looping on the raw VertexBufferPointer. */
+	const int d_vcount = d_SeqCount(context);
 	/* Up to MAX_COLOR_BATCHES independently-tracked flat-color batches, not
 	 * one: a single batch would have to be flushed on every color change,
 	 * turning a strip that alternates color per quad into one draw call per
@@ -5049,6 +5679,9 @@ void d_DrawQuadStrip(GLcontext context)
 	int color_batch_count[MAX_COLOR_BATCHES];
 	v3d_u32 color_batch_color[MAX_COLOR_BATCHES];
 	int num_active_batches = 0;
+
+	if (WIREFRAME_WANTED(context)) { d_DrawWireframe(context, GL_QUAD_STRIP); return; }
+
 
 	for (k = 0; k < MAX_COLOR_BATCHES; k++)
 		color_batch_count[k] = 0;
@@ -5074,10 +5707,38 @@ void d_DrawQuadStrip(GLcontext context)
 
 	d_FrameBegin(context);
 
-	PrepTexCoords(context, 0, context->VertexBufferPointer, GL_FALSE);
+	PrepTexCoords(context, 0, d_vcount, GL_FALSE);
+
+	/*
+	 * SMOOTH: the whole strip is ONE native primitive.
+	 *
+	 * A GL_QUAD_STRIP already arrives in triangle-strip order -- quad k is
+	 * (2k, 2k+1, 2k+3, 2k+2), and submitting 0..n-1 straight through gives
+	 * triangles (0,1,2), (1,2,3), (2,3,4)... which tile exactly the same
+	 * surface. The per-quad decomposition below exists only because a flat
+	 * colour is a per-CALL uniform, so quads of different colours cannot
+	 * share one. Under GL_SMOOTH the colour travels per VERTEX instead
+	 * (d_PackSmooth/d_PackCombined) and fixed_color is never read, so there
+	 * is nothing to split on: one state record and one VertexArrayPrims for
+	 * the entire strip, instead of one of each per quad.
+	 *
+	 * glPolygonMode GL_LINE is unaffected. The hardware draws every TRIANGLE
+	 * edge, strip and fan alike, so the triangulation shows either way.
+	 */
+	if (context->ShadeModel == GL_SMOOTH)
+	{
+		int count = d_vcount & ~1;          /* whole vertex pairs only */
+
+		if (count >= 4)
+		{
+			D(("d_DrawQuadStrip: smooth, one TRIANGLESTRIP of %ld vertices\n", (LONG)count));
+			gl_EmitPrimitiveV3D(context, s_seq, count, V3D_PRIM_TRIANGLESTRIP, GL_FALSE, count);
+		}
+		return;
+	}
 
 	/* Whole quads only: an odd trailing vertex draws nothing. */
-	for (i=0; i+3<context->VertexBufferPointer; i+=2)
+	for (i=0; i+3<d_vcount; i+=2)
 	{
 		{
 			/* Every quad goes through this color-batch path

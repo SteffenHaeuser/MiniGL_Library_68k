@@ -64,7 +64,7 @@
  *   - Buffers[3]/NumBuffers/BufNr: the buffer count is chosen at runtime
  *     with mglChooseNumberOfBuffers, but every request gets single
  *     buffering unless the library is built with
- *     MGLV3D_DOUBLE_BUFFER_ENABLED=1 (see the newNumberOfBuffers
+ *     MGLV3D_DOUBLE_BUFFER_ENABLED=1 (see the g_req.numberOfBuffers
  *     declaration comment for why). When enabled:
  *     1 (the default) = single buffer, no vsync. 2 or 3 = fullscreen
  *     double buffering with vsync: two AllocScreenBuffer buffers, render
@@ -207,7 +207,6 @@
  */
 #include "../../backend/hw/v3d_debug.h"
 
-static char rcsid[] = "$Id: context.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
 
 extern void GLMatrixInit(GLcontext context);
@@ -229,26 +228,26 @@ int MGLDebugLevel;
 
 /* Default values for new context */
 
-/* Surgeon: bumped newVertexBufferSize from 40 to 256 because of increased
+/* Surgeon: bumped vertexBufferSize from 40 to 256 because of increased
  * requirement for clipping space due to buffering (MiniGL source). */
-
-static int newVertexBufferSize = 256;            /* Default: 256 entries in vertex buffer */
-static int newMTBufferSize    = 4096;            /* Default: 4096 verts storage-space */
 
 /* 4096, not the original's 2048: Quake2's own texture numbers run past
  * 2048. A name at or above this size is refused (tex_NameInRange,
  * texture.c) rather than used as an index into
  * context->textureObjects[]/GeneratedTextures[], so this size is headroom,
  * not a safety margin. Each entry costs sizeof(V3DTexture*) +
- * sizeof(GLubyte). */
-static int newTextureBufferSize = 4096;          /* Default: 4096 texture objects */
-static GLboolean newWindowMode = GL_FALSE;       /* Default: Use fullscreen instead of window */
-static GLboolean clw = GL_FALSE;                 /* Default: Keep workbench open */
-static GLboolean newNoMipMapping = GL_TRUE;      /* Default: No mipmapping */
-static GLboolean newNoFallbackAlpha = GL_FALSE;  /* Default: Fall back to supported blend mode */
-static GLboolean newGuardBand = GL_FALSE;        /* Default: guardband clipping is off */
+ * sizeof(GLubyte).
+ *
+ * The ceiling is enforced in mglChooseTextureBufferSize and again at the
+ * allocation. File-local because both of those are in this file, so it needs
+ * no client header. 1M names cost ~5 MB, and keeping the count below 2^30 is
+ * what stops sizeof(V3DTexture *) * count wrapping to a few bytes while
+ * textureObjectCount stays huge -- every name would then pass the range test
+ * and index an allocation that is not there. */
+#define MGL_DEF_TEXTURE_NAMES 4096
+#define MGL_MAX_TEXTURE_NAMES 1048576
 
-/* newNumberOfBuffers: read by vid_OpenDisplay only -- 1 = single buffer
+/* numberOfBuffers: read by vid_OpenDisplay only -- 1 = single buffer
  * without vsync, 2 or 3 = fullscreen double buffering with vsync (see this
  * file's header comment). Windowed mode always renders single-buffer.
  *
@@ -258,7 +257,7 @@ static GLboolean newGuardBand = GL_FALSE;        /* Default: guardband clipping 
  * off: on the Pi 4 RTG stack ChangeScreenBuffer sometimes holds a frame on
  * screen for 2-5 refreshes, so vsync mode stutters.
  *
- * newPixelDepth is accepted-but-vestigial API -- V3D always renders 32-bit
+ * pixelDepth is accepted-but-vestigial API -- V3D always renders 32-bit
  * RGBA8, so the setter is kept only so mglChoosePixelDepth callers still
  * link and don't error. vid_OpenDisplay does not pass it as SA_Depth:
  * CyberGraphX's CYBRIDATTR_DEPTH only counts RGB, not alpha, so the
@@ -269,8 +268,80 @@ static GLboolean newGuardBand = GL_FALSE;        /* Default: guardband clipping 
 #ifndef MGLV3D_DOUBLE_BUFFER_ENABLED
 #define MGLV3D_DOUBLE_BUFFER_ENABLED 0
 #endif
-static int newNumberOfBuffers = 1;
-static int newPixelDepth = 24;
+
+/*
+ * THE PENDING REQUESTS. Every mglChoose and mglProhibit setter writes here,
+ * and they all run BEFORE a context exists -- which is why these cannot live
+ * in GLcontext and have to be file statics. One struct so there is one thing
+ * to reset and, more to the point, ONE copy of the defaults.
+ *
+ * This does not make the library reentrant and is not meant to. gl.h expands
+ * every gl* macro to GLFoo(mini_CurrentContext, ...), 188 times, so the single
+ * current-context global is what makes this driver single-context, and it is
+ * compiled into every client that exists.
+ */
+typedef struct
+{
+	int       vertexBufferSize;   /* entries in the vertex buffer */
+	int       mtBufferSize;       /* verts of multitexture storage */
+	int       textureBufferSize;  /* texture names */
+	GLboolean windowMode;         /* GL_TRUE a window, GL_FALSE a screen */
+	GLboolean closeWorkbench;     /* mglProposeCloseDesktop's request */
+	GLboolean noMipMapping;
+	GLboolean noFallbackAlpha;    /* GL_FALSE falls back to a supported blend */
+	GLboolean guardBand;
+	int       numberOfBuffers;    /* 1 is single-buffered without vsync */
+	int       pixelDepth;         /* accepted but vestigial, see above */
+} mgl_requests;
+
+/* The only copy of the defaults. DESIGNATED initialisers, so adding or moving
+ * a member cannot silently hand it another member's value. */
+#define MGL_REQUEST_DEFAULTS            \
+{                                       \
+	.vertexBufferSize  = 256,           \
+	.mtBufferSize      = 4096,          \
+	.textureBufferSize = MGL_DEF_TEXTURE_NAMES, \
+	.windowMode        = GL_FALSE,      \
+	.closeWorkbench    = GL_FALSE,      \
+	.noMipMapping      = GL_TRUE,       \
+	.noFallbackAlpha   = GL_FALSE,      \
+	.guardBand         = GL_FALSE,      \
+	.numberOfBuffers   = 1,             \
+	.pixelDepth        = 24             \
+}
+
+static const mgl_requests g_req_defaults = MGL_REQUEST_DEFAULTS;
+static mgl_requests       g_req          = MGL_REQUEST_DEFAULTS;
+
+/*
+ * Every mglChoose and mglProhibit request above is a library-wide static, and
+ * the shared library is RESIDENT: a request outlives the program that made it,
+ * so without this a later program that never calls the setter inherits the
+ * previous one's choice. The values are repeated from the declarations
+ * immediately above ON PURPOSE -- kept adjacent so the two cannot drift.
+ *
+ * STATIC, and it stays that way. MGLDeleteContext is the only caller.
+ * minigl.library must not reach in here: the only functions it may call are
+ * the published MGL, gl, glu and glut ones, which is why its LibOpen uses
+ * mglChooseWindowMode rather than anything from this file.
+ *
+ * Not called mid-session either: MGLResizeContext re-enters vid_OpenDisplay
+ * and re-reads g_req.numberOfBuffers, so a resize must still see what its own
+ * program asked for.
+ *
+ * A program that exits WITHOUT deleting its context therefore still leaves the
+ * requests set for the next client of a resident library. Closing that needs a
+ * PUBLISHED entry point, not a back door.
+ */
+static void vid_ResetRequests(void)
+{
+	/* The z-buffer request is the one that cannot join the struct: it lives in
+	 * the backend (v3d_frame.c), where its own default is 32. */
+	extern int g_v3d_requested_zbuffer_bits;
+
+	g_req = g_req_defaults;
+	g_v3d_requested_zbuffer_bits = 32;
+}
 
 static UWORD *MousePointer = 0;
 
@@ -298,23 +369,52 @@ static void vid_DeletePointer(struct Window *window)
  * MGLSetPointer/MGLClearPointer are mglq3-specific extensions (not in the
  * original base MiniGL), called through the bare
  * mglSetPointer()/mglClearPointer() macros (gl.h). Thin wrappers around
- * vid_Pointer/vid_DeletePointer above, matching mglq3's own
- * MGLSetPointer(context) -> vid_Pointer(context->w3dWindow) pattern
- * exactly (w3dWindow is v3dWindow in this port, see context.h's own
- * field-rename comment). Marked "Cowcat" in mglq3's context.c.
+ * vid_Pointer/vid_DeletePointer above. Marked "Cowcat" in mglq3's context.c.
+ *
+ * inputWindow, NOT v3dWindow -- the one divergence from mglq3's
+ * vid_Pointer(context->w3dWindow): v3dWindow is NULL in fullscreen and for
+ * bitmap contexts, so with it here vid_DeletePointer skips its ClearPointer
+ * and still FreeVecs the sprite the backdrop window is displaying. inputWindow
+ * is the window vid_OpenDisplay blanks the pointer on, and equals v3dWindow on
+ * the windowed path, which therefore behaves identically either way.
+ *
+ * BOTH FLUSH FIRST. Having a real window to act on means SetPointer and
+ * ClearPointer really are called, and those are intuition.library calls, which
+ * cybergraphics forbids while a bitmap is locked. These are public entry
+ * points reachable at any moment -- a client application's VID_Shutdown clears the pointer
+ * while the context is still live -- and frame pipelining can still hold the
+ * lock from the last submitted frame, which in fullscreen stalls rather than
+ * returning. vid_OpenDisplay and vid_CloseDisplay need no such guard: neither
+ * has a frame in flight at the point it touches the pointer.
  */
 void MGLSetPointer(GLcontext context)
 {
-	vid_Pointer(context->v3dWindow);
+	extern void MGLFlushPendingRender(GLcontext context);
+
+	MGLFlushPendingRender(context);
+	vid_Pointer(context->inputWindow);
 }
 
 void MGLClearPointer(GLcontext context)
 {
-	vid_DeletePointer(context->v3dWindow);
+	extern void MGLFlushPendingRender(GLcontext context);
+
+	MGLFlushPendingRender(context);
+	vid_DeletePointer(context->inputWindow);
 }
 
 void GLScissor(GLcontext context, GLint x, GLint y, GLsizei width, GLsizei height)
 {
+	/* GL 1.1 4.1.2: a negative width or height is GL_INVALID_VALUE. Without
+	 * this the cast below turned one into a huge unsigned rectangle, which
+	 * DISABLES scissoring rather than reporting the mistake -- the opposite of
+	 * what a caller passing a bad rect wants. State is left untouched. */
+	if (width < 0 || height < 0)
+	{
+		GLFlagError(context, 1, GL_INVALID_VALUE);
+		return;
+	}
+
 	/* Keep GL's own rectangle for glGetIntegerv(GL_SCISSOR_BOX): the backend
 	 * copy below is top-origin and 16-bit, so it cannot be handed back. */
 	context->ScissorBox[0] = x;
@@ -398,7 +498,7 @@ static void vid_CloseDisplay(GLcontext context, GLboolean keep_backend)
 	context->v3dWindow = NULL;
 	context->v3dScreen = NULL;
 
-	if (clw == GL_TRUE) OpenWorkBench();
+	if (context->CloseWorkbench == GL_TRUE) OpenWorkBench();
 }
 
 /* Fullscreen path. v3dWindow stays NULL: the backdrop window opened below
@@ -423,10 +523,19 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 	if (!context)
 	    return GL_FALSE;
 
-	if (clw == GL_TRUE)
+	/* Capture the request, then CONSUME it. The capture is what lets the close
+	 * path reopen the Workbench only if this context is the one that closed it.
+	 * Clearing the static is what stops the carry-over, and it has to happen
+	 * HERE rather than in MGLInit: MGLInit is not in the dispatch table, so a
+	 * library client cannot call it -- ioq3 and glquakelib say so outright and
+	 * skip it, and the resident library is what the games actually run on. So
+	 * one request applies to the next display opened and no further. */
+	context->CloseWorkbench = g_req.closeWorkbench;
+	g_req.closeWorkbench = GL_FALSE;
+	if (context->CloseWorkbench == GL_TRUE)
 	    CloseWorkBench();
 
-	D(("vid_OpenDisplay: enter, w=%ld h=%ld newPixelDepth=%ld\n", (LONG)w, (LONG)h, (LONG)newPixelDepth));
+	D(("vid_OpenDisplay: enter, w=%ld h=%ld g_req.pixelDepth=%ld\n", (LONG)w, (LONG)h, (LONG)g_req.pixelDepth));
 
 	/* No CYBRBIDTG_PixelFormat-style tag exists in this SDK, so there's no
 	 * way to ask BestCModeIDTags for a specific pixel/channel order --
@@ -466,27 +575,70 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 	D(("vid_OpenDisplay: found ModeID 0x%08lx\n", (ULONG)modeID));
 
 	/*
-	 * SA_Depth never comes from the caller-supplied newPixelDepth -- that
+	 * SA_Depth never comes from the caller-supplied g_req.pixelDepth -- that
 	 * is just whatever the last mglChoosePixelDepth() call happened to
 	 * pass, and a value deeper than the mode's own depth (32 against the 24
 	 * this mode reports) can make OpenScreenTags fail with OSERR_TOODEEP
-	 * (see newPixelDepth's own declaration comment above). Read the ACTUAL depth of the mode just found instead --
+	 * (see g_req.pixelDepth's own declaration comment above). Read the ACTUAL depth of the mode just found instead --
 	 * matches the mode unconditionally, regardless of what any GL client
 	 * asked mglChoosePixelDepth() for.
 	 */
 	realDepth = GetCyberIDAttr(CYBRIDATTR_DEPTH, modeID);
-	D(("vid_OpenDisplay: mode's real depth=%ld (newPixelDepth was %ld, now ignored)\n",
-	   (LONG)realDepth, (LONG)newPixelDepth));
+	D(("vid_OpenDisplay: mode's real depth=%ld (g_req.pixelDepth was %ld, now ignored)\n",
+	   (LONG)realDepth, (LONG)g_req.pixelDepth));
 
-	context->v3dScreen = OpenScreenTags(NULL,
-		SA_Depth,      realDepth,
-		SA_DisplayID,  modeID,
-		SA_Width,      (ULONG)w,
-		SA_Height,     (ULONG)h,
-		SA_ErrorCode,  (ULONG)&errorCode,
-		SA_ShowTitle,  FALSE,
-		SA_Draggable,  FALSE,
-		TAG_DONE);
+	/*
+	 * DEPTH LADDER. SA_Depth asks for COLOUR depth, and the search above
+	 * accepted this mode only because it is PIXFMT_BGRA32 -- 24 bits of RGB
+	 * plus 8 of alpha -- so 24 is what it carries, whatever a graphics
+	 * library reports for it. CyberGraphX reports 24 and agrees; a newer
+	 * rtg.library reports 32 because it counts the alpha, and OpenScreenTags
+	 * refuses that as deeper than the hardware supports (OSERR_TOODEEP).
+	 *
+	 * So ask for 24, and on OSERR_TOODEEP only, fall back to the mode's
+	 * reported depth and then to 32. Never below 24: this driver renders into
+	 * a 4-bytes-per-pixel surface and vid_AdoptBitMap rejects anything less,
+	 * so a 16-bit screen would fail later and less clearly.
+	 *
+	 * Any other error is not about depth, so it stops the ladder rather than
+	 * repeating a doomed call three times.
+	 */
+	{
+		ULONG tries[3];
+		int   ntries = 0, i;
+
+		tries[ntries++] = 24;
+		if (realDepth != 24) tries[ntries++] = realDepth;
+		if (realDepth != 32) tries[ntries++] = 32;
+
+		for (i = 0; i < ntries; i++)
+		{
+			errorCode = 0;
+			context->v3dScreen = OpenScreenTags(NULL,
+				SA_Depth,      tries[i],
+				SA_DisplayID,  modeID,
+				SA_Width,      (ULONG)w,
+				SA_Height,     (ULONG)h,
+				SA_ErrorCode,  (ULONG)&errorCode,
+				SA_ShowTitle,  FALSE,
+				SA_Draggable,  FALSE,
+				TAG_DONE);
+
+			if (context->v3dScreen)
+			{
+				if (i > 0)
+					E(("vid_OpenDisplay: opened at SA_Depth=%ld after the mode's reported %ld was refused\n",
+					   (LONG)tries[i], (LONG)realDepth));
+				break;
+			}
+
+			E(("vid_OpenDisplay: OpenScreenTags SA_Depth=%ld FAILED, modeID=%08lx errorCode=%ld\n",
+			   (LONG)tries[i], (ULONG)modeID, (LONG)errorCode));
+
+			if (errorCode != OSERR_TOODEEP)
+				break;
+		}
+	}
 
 	if (!context->v3dScreen)
 	{
@@ -542,9 +694,9 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 	 * doesn't start.
 	 *
 	 * Off by default: never taken unless built with
-	 * MGLV3D_DOUBLE_BUFFER_ENABLED=1 (see the newNumberOfBuffers
+	 * MGLV3D_DOUBLE_BUFFER_ENABLED=1 (see the g_req.numberOfBuffers
 	 * declaration comment). */
-	if (MGLV3D_DOUBLE_BUFFER_ENABLED && newNumberOfBuffers >= 2)
+	if (MGLV3D_DOUBLE_BUFFER_ENABLED && g_req.numberOfBuffers >= 2)
 	{
 		context->Buffers[0] = AllocScreenBuffer(context->v3dScreen, NULL, SB_SCREEN_BITMAP);
 		if (context->Buffers[0])
@@ -566,7 +718,7 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 
 			context->NumBuffers = 2;
 			context->BufNr = 1;
-			D(("vid_OpenDisplay: double buffering (%ld requested, 2 used)\n", (LONG)newNumberOfBuffers));
+			D(("vid_OpenDisplay: double buffering (%ld requested, 2 used)\n", (LONG)g_req.numberOfBuffers));
 		}
 		else
 		{
@@ -620,6 +772,11 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 		context->inputWindow = OpenWindowTagList(NULL, BackdropWinTags);
 		if (!context->inputWindow)
 		{
+			/* Not fatal: the context is returned and rendering works, only the
+			 * input path is lost. Said out loud rather than left to a debug
+			 * build, where D() compiles to nothing. */
+			D(("Warning: input window could not be opened; MGLMainLoop and the\n"
+			       "         keyboard and mouse callbacks will receive no events\n"));
 			D(("vid_OpenDisplay: backdrop OpenWindowTagList failed (not fatal, MGLMainLoop just won't work)\n"));
 		}
 		else
@@ -641,7 +798,7 @@ static GLboolean vid_OpenDisplay(GLcontext context, int w, int h, GLboolean keep
 
 Duh:
 	E(("vid_OpenDisplay: Duh -- opening of fullscreen display failed\n"));
-	printf("Error: opening of fullscreen display failed\n");
+	E(("Error: opening of fullscreen display failed\n"));
 	vid_CloseDisplay(context, GL_FALSE);
 	return GL_FALSE;
 }
@@ -736,7 +893,7 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
 	context->v3dRastPort = malloc(sizeof(struct RastPort));
 	if (!context->v3dRastPort)
 	{
-		printf("Error: unable to allocate rastport memory\n");
+		E(("Error: unable to allocate rastport memory\n"));
 		goto Duh;
 	}
 
@@ -773,7 +930,7 @@ static GLboolean vid_OpenWindow(GLcontext context, int w, int h)
 	return GL_TRUE;
 
 Duh:
-	printf("Error: opening of windowed display failed\n");
+	E(("Error: opening of windowed display failed\n"));
 	vid_CloseWindow(context);
 	return GL_FALSE;
 }
@@ -814,7 +971,7 @@ static GLboolean vid_AdoptWindow(GLcontext context, struct Window *window, int w
 	context->v3dRastPort = malloc(sizeof(struct RastPort));
 	if (!context->v3dRastPort)
 	{
-		printf("Error: unable to allocate rastport memory\n");
+		E(("Error: unable to allocate rastport memory\n"));
 		goto Duh;
 	}
 
@@ -844,7 +1001,7 @@ static GLboolean vid_AdoptWindow(GLcontext context, struct Window *window, int w
 	return GL_TRUE;
 
 Duh:
-	printf("Error: adopting the application's window failed\n");
+	E(("Error: adopting the application's window failed\n"));
 	vid_CloseWindow(context);
 	return GL_FALSE;
 }
@@ -874,7 +1031,7 @@ static GLboolean vid_AdoptBitMap(GLcontext context, struct BitMap *bitmap, int w
 	context->v3dRastPort = malloc(sizeof(struct RastPort));
 	if (!context->v3dRastPort)
 	{
-		printf("Error: unable to allocate rastport memory\n");
+		E(("Error: unable to allocate rastport memory\n"));
 		goto Duh;
 	}
 
@@ -894,7 +1051,7 @@ static GLboolean vid_AdoptBitMap(GLcontext context, struct BitMap *bitmap, int w
 			TAG_DONE);
 		if (!probe)
 		{
-			printf("Error: the supplied bitmap could not be locked\n");
+			E(("Error: the supplied bitmap could not be locked\n"));
 			goto Duh;
 		}
 		UnLockBitMap(probe);
@@ -919,9 +1076,9 @@ static GLboolean vid_AdoptBitMap(GLcontext context, struct BitMap *bitmap, int w
 		{
 			E(("vid_AdoptBitMap: bprow %lu for width %ld -- needs 4 bytes/pixel\n",
 			   (ULONG)context->bprow, (LONG)w));
-			printf("Error: the supplied bitmap is not 32-bit (needs 4 bytes per pixel,\n"
+			E(("Error: the supplied bitmap is not 32-bit (needs 4 bytes per pixel,\n"
 			       "       got %lu bytes per row for a width of %d)\n",
-			       (unsigned long)context->bprow, w);
+			       (unsigned long)context->bprow, w));
 			goto Duh;
 		}
 	}
@@ -935,12 +1092,12 @@ static GLboolean vid_AdoptBitMap(GLcontext context, struct BitMap *bitmap, int w
 	return GL_TRUE;
 
 Duh:
-	printf("Error: adopting the application's bitmap failed\n");
+	E(("Error: adopting the application's bitmap failed\n"));
 	vid_CloseWindow(context);
 	return GL_FALSE;
 }
 
-void MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
+GLboolean MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
 {
 	/* Fullscreen only -- matches the original, which only ever resized
 	 * the no-w3dBitMap (fullscreen) case. Like the original's
@@ -953,11 +1110,54 @@ void MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
 	{
 		extern void MGLFlushPendingRender(GLcontext context);
 
+		/* A zero or negative size would reach OpenScreenTags as a nonsense
+		 * mode request. GL 1.1 4.1 uses GL_INVALID_VALUE for this shape of
+		 * argument, and the display is left exactly as it was. */
+		if (width <= 0 || height <= 0)
+		{
+			GLFlagError(context, 1, GL_INVALID_VALUE);
+			return GL_FALSE;
+		}
+
 		MGLFlushPendingRender(context);
 		context->backend.frame_active = FALSE;
 		vid_CloseDisplay(context, GL_TRUE);
-		vid_OpenDisplay(context, (int)width, (int)height, GL_TRUE);
+
+		/* The reopen can fail -- the depth ladder runs out of modes, or the
+		 * new size does not fit in Chip RAM. vid_OpenDisplay returns GLboolean,
+		 * and discarding it would leave the display CLOSED while the call
+		 * looked like it had worked: every later draw would go nowhere and the
+		 * only symptom would be that the picture stopped.
+		 *
+		 * Reported by the return value rather than a GL error, because GL has
+		 * no code that means "the display mode could not be reopened" --
+		 * GL_OUT_OF_MEMORY would name a cause that is usually not the real
+		 * one. The context keeps its textures and GL state either way
+		 * (keep_backend), so a caller that retries at a size which does fit
+		 * recovers. */
+		if (!vid_OpenDisplay(context, (int)width, (int)height, GL_TRUE))
+		{
+			E(("MGLResizeContext: reopen at %ldx%ld FAILED -- display is closed\n",
+			   (LONG)width, (LONG)height));
+			return GL_FALSE;
+		}
+
+		/* The same two calls MGLCreateContext makes after a successful open,
+		 * and for the same reason: the viewport and depth range belong to the
+		 * drawable's size. Without them the old viewport survives, so after a
+		 * shrink it describes an area larger than the drawable and after a
+		 * grow it leaves the new edges unrendered. The CLEAR COLOUR is
+		 * deliberately not reset -- that is the application's state, not the
+		 * drawable's, and it has to survive a resize. */
+		GLDepthRange(context, 0.0, 1.0);
+		GLViewport(context, 0, 0, (GLsizei)width, (GLsizei)height);
+		return GL_TRUE;
 	}
+
+	/* Windowed: the original only ever resized the fullscreen case, and a
+	 * windowed context is sized by the window its host owns. Nothing was
+	 * asked for and nothing failed. */
+	return GL_TRUE;
 }
 
 /* Returns context->inputWindow, the same window MGLGetInputWindowHandle()
@@ -969,10 +1169,9 @@ void MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
  * function's return value differs from it. v3dWindow stays NULL in
  * fullscreen, because it is load-bearing as the windowed-vs-fullscreen mode
  * flag, not just a handle: GLViewport (viewport.c) branches on it for the
- * Y-flip origin, MGLWriteShotPPM (others.c) for its width/height/RastPort
- * source, and MGLLockBack (this file) for whether a fullscreen
+ * Y-flip origin, and MGLLockBack (this file) for whether a fullscreen
  * double-buffered context has a back-buffer address to hand out. Flipping
- * v3dWindow itself would silently break all three. */
+ * v3dWindow itself would silently break both. */
 void *MGLGetWindowHandle(GLcontext context)
 {
 	return context->inputWindow;
@@ -985,43 +1184,57 @@ void *MGLGetInputWindowHandle(GLcontext context)
 
 void mglChooseGuardBand(GLboolean flag)
 {
-	newGuardBand = flag;
+	g_req.guardBand = flag;
 }
 
 
 void mglChooseVertexBufferSize(int size)
 {
-	newVertexBufferSize = size;
+	g_req.vertexBufferSize = size;
 }
 
 void mglChooseMtexBufferSize(int size)
 {
 	int align = size % 4; /* bufferindex is 1/4 size */
 
-	newMTBufferSize = size;
+	g_req.mtBufferSize = size;
 
 	if(align)
 	{
-	  	newMTBufferSize += 4-align;
+	  	g_req.mtBufferSize += 4-align;
 	}
 }
 
+/* A size outside 1..MGL_MAX_TEXTURE_NAMES is ignored and the current value
+ * kept, which is mglChooseZBufferDepth's arrangement further down: checked
+ * here, checked again where the tables are allocated. There is no context yet
+ * when this is called, so glGetError has nowhere to record and the serial line
+ * is the only channel. A stored 0 would let glGenTextures hand out name 1
+ * and write past a zero-length table. */
 void mglChooseTextureBufferSize(int size)
 {
-	newTextureBufferSize = size;
+	if (size < 1 || size > MGL_MAX_TEXTURE_NAMES)
+	{
+		E(("mglChooseTextureBufferSize: %ld outside 1..%ld, keeping %ld\n",
+			(LONG)size, (LONG)MGL_MAX_TEXTURE_NAMES,
+			(LONG)g_req.textureBufferSize));
+		return;
+	}
+
+	g_req.textureBufferSize = size;
 }
 
 void mglChooseNumberOfBuffers(int number)
 {
 	/* Takes effect at the next MGLCreateContext/MGLResizeContext -- see the
-	 * newNumberOfBuffers declaration comment above. Has no effect unless
+	 * g_req.numberOfBuffers declaration comment above. Has no effect unless
 	 * built with MGLV3D_DOUBLE_BUFFER_ENABLED=1. */
-	newNumberOfBuffers = number;
+	g_req.numberOfBuffers = number;
 }
 
 void mglChoosePixelDepth(int depth)
 {
-	newPixelDepth = depth;
+	g_req.pixelDepth = depth;
 }
 
 /* Z-BUFFER precision, in bits: 32 = D32F (default), 16 = D16.
@@ -1031,7 +1244,7 @@ void mglChoosePixelDepth(int depth)
  * depth almost everywhere on AmigaOS (SA_Depth, CYBRMATTR_DEPTH, and this very
  * file's own vid_OpenDisplay code), and requesting SA_Depth=32 against a
  * 24-bit mode can make OpenScreenTags fail with OSERR_TOODEEP (see
- * newPixelDepth's own declaration comment) -- hence "ZBuffer" in the name
+ * g_req.pixelDepth's own declaration comment) -- hence "ZBuffer" in the name
  * rather than a bare "Depth".
  *
  * Must be called BEFORE MGLCreateContext, like the rest of the mglChoose*
@@ -1054,27 +1267,67 @@ void mglChooseZBufferDepth(int bits)
 
 void mglProposeCloseDesktop(GLboolean closeme)
 {
-	clw = closeme;
+	g_req.closeWorkbench = closeme;
+}
+
+/* MGLInit calls this, so every program starts from the documented default.
+ * Capturing the flag into the context fixes a change made DURING a context's
+ * life, but not the carry-over: the request is a library-wide static and the
+ * library is resident, so one program's GL_TRUE would still be read when the
+ * next program's display opens. Reset at MGLInit rather than at context
+ * teardown, because a program that sets the flag and then never creates a
+ * context would otherwise still leave it set. */
+void vid_ResetCloseDesktopRequest(void)
+{
+	g_req.closeWorkbench = GL_FALSE;
 }
 
 void mglProhibitMipMapping(GLboolean flag)
 {
-	newNoMipMapping = flag;
+	g_req.noMipMapping = flag;
 }
 
 void mglProhibitAlphaFallback(GLboolean flag)
 {
-	newNoFallbackAlpha = flag;
+	g_req.noFallbackAlpha = flag;
 }
 
 void mglChooseWindowMode(GLboolean flag)
 {
-	newWindowMode = flag;
+	g_req.windowMode = flag;
 }
 
 
+/*
+ * GLclampf means what the name says: GL clamps these components to [0,1] at
+ * specification time, and this did not.
+ *
+ * Without the clamp a negative component is scaled to a negative float and then
+ * cast to GLubyte, which wraps rather than saturating -- so a component crossing
+ * zero jumps from 0 to near 255 instead of staying at black. An application
+ * fading a sky past black by subtracting a growing value from each component
+ * showed this as the WHOLE sky stepping blue -> red -> yellow -> white -> grey,
+ * as red, then green, then blue went negative in turn and wrapped high.
+ *
+ * Only the clamp is added. In-range values keep exactly the conversion they had,
+ * so nothing that was already correct moves, and deliberately no rounding term
+ * is introduced -- on this target a float-to-integer cast rounds under the
+ * caller's FPCR, and adding 0.5 first makes every exact integer a tie.
+ */
+static GLclampf ctx_ClampUnit(GLclampf v)
+{
+	if (v < 0.0f) return 0.0f;
+	if (v > 1.0f) return 1.0f;
+	return v;
+}
+
 void GLClearColor(GLcontext context, GLclampf red, GLclampf green, GLclampf blue, GLclampf alpha)
 {
+	red   = ctx_ClampUnit(red);
+	green = ctx_ClampUnit(green);
+	blue  = ctx_ClampUnit(blue);
+	alpha = ctx_ClampUnit(alpha);
+
 	red *= 255.0;
 	green *= 255.0;
 	blue *= 255.0;
@@ -1841,7 +2094,7 @@ static v3d_wait_result gl_FramePresent(GLcontext context)
 	TileRenderingModeCFGZSClearValues(backend, 0, backend->clear_depth_value);
 	TileListInitialBlockSize(backend, v3d_TILE_ALLOCATION_BLOCK_SIZE_64B, TRUE);
 
-	/* From PoC/v3d_cle.c:76-78 -- supertile grid sizing. */
+	/* From an earlier library by the same author -- supertile grid sizing. */
 	supertile_w = 1;
 	supertile_h = 1;
 	for (;;)
@@ -2075,6 +2328,7 @@ static void gl_ClearViaQuad(GLcontext context, GLbitfield mask)
 	GLboolean s_alpha = context->AlphaTest_State;
 	GLboolean s_fog = context->Fog_State;
 	GLboolean s_cull = context->CullFace_State;
+	GLboolean s_lighting = context->Lighting_State;
 	GLboolean s_tex[MAX_TEXUNIT];
 	GLboolean s_cr = context->ColorMaskR, s_cg = context->ColorMaskG;
 	GLboolean s_cb = context->ColorMaskB, s_ca = context->ColorMaskA;
@@ -2106,6 +2360,12 @@ static void gl_ClearViaQuad(GLcontext context, GLbitfield mask)
 	MGLSetState(context, GL_ALPHA_TEST, GL_FALSE);
 	MGLSetState(context, GL_FOG, GL_FALSE);
 	MGLSetState(context, GL_CULL_FACE, GL_FALSE);
+	/* Lighting off for the quad, for the same reason fog is: the clear colour
+	 * must arrive at the framebuffer exactly as glClearColor set it. The quad's
+	 * four vertices carry no normal of their own, so a lit clear would shade
+	 * them with whatever current normal the application last left behind and
+	 * clear the screen to a darkened, orientation-dependent colour. */
+	MGLSetState(context, GL_LIGHTING, GL_FALSE);
 
 	/* Each bit writes only its own buffer: a colour-only clear must leave
 	 * depth untouched, and a depth-only clear must leave colour untouched. */
@@ -2118,7 +2378,14 @@ static void gl_ClearViaQuad(GLcontext context, GLbitfield mask)
 		GLDepthFunc(context, GL_ALWAYS);
 	}
 
-	GLColorMask(context, do_color, do_color, do_color, do_color);
+	/* The application's glColorMask applies to a clear too (GL 1.1 4.2.2), so
+	 * AND it in rather than forcing all four channels on: do_color gates whether
+	 * colour is written at all, the saved mask picks which channels within that.
+	 * draw.c turns this into a real per-draw colour mask, which is the whole
+	 * reason a masked clear is routed here instead of to the TLB clear. */
+	GLColorMask(context,
+	            (GLboolean)(do_color && s_cr), (GLboolean)(do_color && s_cg),
+	            (GLboolean)(do_color && s_cb), (GLboolean)(do_color && s_ca));
 
 	GLColor4f(context,
 	          (GLfloat)((cc >> 16) & 0xFF) * (1.0f / 255.0f),
@@ -2176,6 +2443,7 @@ static void gl_ClearViaQuad(GLcontext context, GLbitfield mask)
 	MGLSetState(context, GL_ALPHA_TEST, s_alpha);
 	MGLSetState(context, GL_FOG, s_fog);
 	MGLSetState(context, GL_CULL_FACE, s_cull);
+	MGLSetState(context, GL_LIGHTING, s_lighting);
 	/* zmode first: restoring GL_DEPTH_TEST recomputes depth_ez_dir from it,
 	 * and with the quad's ALWAYS still in place early-Z would stay disabled
 	 * until the application next called glDepthFunc. */
@@ -2196,17 +2464,52 @@ void GLClear(GLcontext context, GLbitfield mask)
 {
 	V3DContext* backend = &context->backend;
 
+	GLboolean masked_color = GL_FALSE;
+
+	if (!(mask & (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)))
+		return;
+
+	/*
+	 * glDepthMask and glColorMask apply to a CLEAR as well as to a draw
+	 * (GL 1.1 4.2.2), and the TLB clear cannot express either: it writes whole
+	 * tiles, every channel. Decide here what the hardware clear can still do.
+	 *
+	 * A buffer masked off entirely is simply not cleared, so its bit is
+	 * dropped. A PARTIALLY masked colour buffer has to go through the quad
+	 * path instead, which draws through the normal pipeline and so picks up
+	 * draw.c's real per-draw colour mask.
+	 *
+	 * The full-mask case -- every channel on, depth writes on -- is what every
+	 * game actually does, and it still takes the TLB clear untouched.
+	 */
+	if ((mask & GL_DEPTH_BUFFER_BIT) && !context->DepthMask)
+		mask &= ~GL_DEPTH_BUFFER_BIT;
+
+	if (mask & GL_COLOR_BUFFER_BIT)
+	{
+		int chans = (context->ColorMaskR ? 1 : 0) + (context->ColorMaskG ? 1 : 0)
+		          + (context->ColorMaskB ? 1 : 0) + (context->ColorMaskA ? 1 : 0);
+
+		if (chans == 0)
+			mask &= ~GL_COLOR_BUFFER_BIT;
+		else if (chans < 4)
+			masked_color = GL_TRUE;
+	}
+
+	/* Every buffer named is masked off, so there is nothing to clear. */
 	if (!(mask & (GL_COLOR_BUFFER_BIT|GL_DEPTH_BUFFER_BIT)))
 		return;
 
 	/* Scissored clear: anything short of the whole drawable cannot use the
 	 * TLB clear (it is per-tile, all-or-nothing), so hand it to the quad
 	 * path -- which also spares it the pass split below. See
-	 * gl_ClearViaQuad's own comment. */
-	if (backend->scissor_enable &&
+	 * gl_ClearViaQuad's own comment. A partially masked colour clear goes the
+	 * same way and for the same reason: the TLB clear cannot do it either. */
+	if (masked_color ||
+	    (backend->scissor_enable &&
 	    (backend->scissor_x > 0 || backend->scissor_y > 0 ||
 	     (ULONG)(backend->scissor_x + backend->scissor_w) < (ULONG)backend->width ||
-	     (ULONG)(backend->scissor_y + backend->scissor_h) < (ULONG)backend->height))
+	     (ULONG)(backend->scissor_y + backend->scissor_h) < (ULONG)backend->height)))
 	{
 		/* A pass must exist to draw into -- ordinarily one already does,
 		 * but a scissored clear as a frame's very first GL call has none. */
@@ -2282,6 +2585,22 @@ void MGLLockMode(GLcontext context, GLenum lockMode)
 #endif
 }
 
+/* Every MGLLockBack refusal answers the same way: the geometry, which is true
+ * whether or not an address exists, and an explicitly empty address so a caller
+ * that ignores the return value cannot mistake a stale pointer for a buffer. */
+static void lock_refuse(GLcontext context, MGLLockInfo *info)
+{
+	if (info)
+	{
+		info->width = context->backend.width;
+		info->height = context->backend.height;
+		info->depth = 32;
+		info->pixel_format = 0;
+		info->base_address = NULL;
+		info->pitch = 0;
+	}
+}
+
 GLboolean MGLLockBack(GLcontext context, MGLLockInfo *info)
 {
 	if (!context->v3dWindow && context->NumBuffers >= 2)
@@ -2290,19 +2609,25 @@ GLboolean MGLLockBack(GLcontext context, MGLLockInfo *info)
 		 * put on display, and no lock is held once mglSwitchDisplay returns
 		 * -- there is no valid back-buffer address to hand out. Refuse
 		 * rather than let the caller write into the visible buffer. */
-		if (info)
-		{
-			info->width = context->backend.width;
-			info->height = context->backend.height;
-			info->depth = 32;
-			info->pixel_format = 0;
-			info->base_address = NULL;
-			info->pitch = 0;
-		}
+		lock_refuse(context, info);
 		return GL_FALSE;
 	}
 
-	/* No hardware lock primitive exists -- see this file's header comment. */
+	/* THE ADDRESS IS ONLY VALID INSIDE AN AMIGAOS BITMAP LOCK, which
+	 * gl_FramePresent takes and MGLFlushPendingRender releases -- never while
+	 * application code is running, so this normally refuses. bitmapLock is the
+	 * only honest test: every UnLockBitMap site NULLs it, while vmembase is
+	 * deliberately left alone and goes stale. Handing that stale pointer out
+	 * reported success and invited a write into an unlocked bitmap. */
+	if (!context->bitmapLock || !context->vmembase)
+	{
+		lock_refuse(context, info);
+		return GL_FALSE;
+	}
+
+	/* No hardware lock primitive exists -- see this file's header comment.
+	 * Set only on the success path: a refused lock must not leave the context
+	 * marked as locked. */
 	context->v3dLocked = GL_TRUE;
 
 	if (info)
@@ -2580,35 +2905,35 @@ GLboolean MGLInitContext(GLcontext context)
 
 	D(("MGLInitContext: enter\n"));
 
-	context->WBuffer	    = malloc(64*newVertexBufferSize);
+	context->WBuffer	    = malloc(64*g_req.vertexBufferSize);
 	if (!context->WBuffer)
 	{
-		E(("MGLInitContext: WBuffer malloc failed (%ld bytes)\n", (LONG)(64*newVertexBufferSize)));
+		E(("MGLInitContext: WBuffer malloc failed (%ld bytes)\n", (LONG)(64*g_req.vertexBufferSize)));
 		return GL_FALSE;
 	}
 
-	context->ElementIndex	    = malloc(sizeof(UWORD)*(newVertexBufferSize));
+	context->ElementIndex	    = malloc(sizeof(GLuint)*(g_req.vertexBufferSize));
 	if (!context->ElementIndex)
 	{
 		E(("MGLInitContext: ElementIndex malloc failed\n"));
 		return GL_FALSE;
 	}
 
-	context->ElementTexS	    = malloc(sizeof(GLfloat)*(newVertexBufferSize));
+	context->ElementTexS	    = malloc(sizeof(GLfloat)*(g_req.vertexBufferSize));
 	if (!context->ElementTexS)
 	{
 		E(("MGLInitContext: ElementTexS malloc failed\n"));
 		return GL_FALSE;
 	}
 
-	context->ElementTexT	    = malloc(sizeof(GLfloat)*(newVertexBufferSize));
+	context->ElementTexT	    = malloc(sizeof(GLfloat)*(g_req.vertexBufferSize));
 	if (!context->ElementTexT)
 	{
 		E(("MGLInitContext: ElementTexT malloc failed\n"));
 		return GL_FALSE;
 	}
 
-	context->VertexBuffer       = malloc(sizeof(MGLVertex)*newVertexBufferSize);
+	context->VertexBuffer       = malloc(sizeof(MGLVertex)*g_req.vertexBufferSize);
 	if (!context->VertexBuffer)
 	{
 		E(("MGLInitContext: VertexBuffer malloc failed\n"));
@@ -2620,24 +2945,24 @@ GLboolean MGLInitContext(GLcontext context)
 	{
 		extern GLboolean d_AllocSeq(int size);
 
-		if (!d_AllocSeq(newVertexBufferSize))
+		if (!d_AllocSeq(g_req.vertexBufferSize))
 		{
 			E(("MGLInitContext: vertex number table malloc failed\n"));
 			return GL_FALSE;
 		}
 	}
 
-	context->NormalBuffer       = malloc(sizeof(MGLNormal)*newVertexBufferSize);
+	context->NormalBuffer       = malloc(sizeof(MGLNormal)*g_req.vertexBufferSize);
 	if (!context->NormalBuffer)
 	{
 		E(("MGLInitContext: NormalBuffer malloc failed\n"));
 		return GL_FALSE;
 	}
 
-	context->VertexBufferSize   = (GLuint)newVertexBufferSize;
+	context->VertexBufferSize   = (GLuint)g_req.vertexBufferSize;
 	context->VertexBufferPointer = 0;
 
-	if(!AllocMtex(newMTBufferSize))
+	if(!AllocMtex(g_req.mtBufferSize))
 	{
 		E(("MGLInitContext: AllocMtex failed\n"));
 		return GL_FALSE;
@@ -2646,13 +2971,37 @@ GLboolean MGLInitContext(GLcontext context)
 
 	context->NormalBufferPointer = 0;
 
+	/*
+	 * (0,0,1), which is GL's specified default current normal. A zero vector
+	 * would not be a direction at all.
+	 *
+	 * Slot 0 is the normal a vertex gets when no glNormal3f has been issued:
+	 * GLNormal3f pushes at a pre-incremented index so it never writes slot 0,
+	 * and GLBegin's carry only fills it once some normal has been set. An
+	 * application that never sets one therefore draws its whole scene with
+	 * slot 0.
+	 *
+	 * A zero there would not be harmless even though this port has no lighting,
+	 * because the normal's other reader is sphere-map texgen (draw.c's
+	 * v_GenTexCoords, which transforms it through InvRot). A zero normal makes
+	 * the reflection vector degenerate, so a reflected environment map lands at
+	 * an arbitrary horizontal offset instead of beneath its light source.
+	 *
+	 * Bounded: only an application that uses texgen WITHOUT ever calling
+	 * glNormal3f can observe this. In practice the client applications use no texgen at all, and a client application sets a normal wherever it does.
+	 */
 	context->NormalBuffer[0].x = 0.f;
 	context->NormalBuffer[0].y = 0.f;
-	context->NormalBuffer[0].z = 0.f;
+	context->NormalBuffer[0].z = 1.f;
 
-	context->textureObjectCount = newTextureBufferSize;
-	context->textureObjects     = malloc(sizeof(V3DTexture *) * newTextureBufferSize);
-	context->GeneratedTextures  = malloc(sizeof(GLubyte) * newTextureBufferSize);
+	/* Second check, at the line whose product must not wrap. The setter is the
+	 * only writer today; this is here so that stays true of any future one. */
+	if (g_req.textureBufferSize < 1 || g_req.textureBufferSize > MGL_MAX_TEXTURE_NAMES)
+		g_req.textureBufferSize = MGL_DEF_TEXTURE_NAMES;
+
+	context->textureObjectCount = g_req.textureBufferSize;
+	context->textureObjects     = malloc(sizeof(V3DTexture *) * g_req.textureBufferSize);
+	context->GeneratedTextures  = malloc(sizeof(GLubyte) * g_req.textureBufferSize);
 
 	if (!context->textureObjects || !context->GeneratedTextures)
 	{
@@ -2669,7 +3018,7 @@ GLboolean MGLInitContext(GLcontext context)
 	context->ActiveTexture   = 0;
 	context->VirtualTexUnits = 0;  /* disable multitex */
 
-	for (i=0; i<newTextureBufferSize; i++)
+	for (i=0; i<g_req.textureBufferSize; i++)
 	{
 		context->textureObjects[i]	= NULL;
 		context->GeneratedTextures[i]   = 0;
@@ -2703,25 +3052,50 @@ GLboolean MGLInitContext(GLcontext context)
 	context->FogStart           = 1.0;
 	context->FogEnd             = 0.0;
 
+	/* Lighting: the eight lights, the material, the light model and the folded
+	 * products. In light.c so the reasoning behind the two defaults that are
+	 * easy to get wrong sits next to the values -- see light_SetDefaults. */
+	light_SetDefaults(context);
+
 	for (i=0; i<MAX_TEXUNIT; i++)
 	{
 	    context->Texture2D_State[i]	= GL_FALSE;
 	    context->TexEnv[i]		= GL_MODULATE;
+	    /* GL_TEXTURE_ENV_COLOR's default, GL 1.1 table 6.15. Read only by
+	     * GL_BLEND; at (0,0,0,0) that mode darkens towards black. */
+	    context->TexEnvColor[i][0]	= 0.0f;
+	    context->TexEnvColor[i][1]	= 0.0f;
+	    context->TexEnvColor[i][2]	= 0.0f;
+	    context->TexEnvColor[i][3]	= 0.0f;
 	}
 
 
 	context->CurTexEnv = 0;
 
-	context->MinFilter = GL_NEAREST;
-	context->MagFilter = GL_NEAREST;
-	context->WrapS     = GL_REPEAT;
-	context->WrapT     = GL_REPEAT;
+	/* Latched at context creation: the mglChoose* setters must all be called
+	 * before MGLCreateContext, so this is the request that produced this
+	 * context even though vid_OpenDisplay may have downgraded it. */
+	context->RequestedBuffers = (GLuint)g_req.numberOfBuffers;
+	/* CurPolygonModeBack is given GL_FILL
+	 * with CurPolygonMode below, not zeroed here. CloseWorkbench is NOT
+	 * defaulted here either, and that is load-bearing: MGLCreateContext calls
+	 * vid_OpenDisplay BEFORE this function, so defaulting it would wipe that
+	 * function's capture of the mglProposeCloseDesktop request and the
+	 * Workbench would never be reopened. MEMF_CLEAR already gives GL_FALSE to
+	 * the FromWindow and FromBitMap paths, which open no display. */
+	/* GL_TRUE, not the allocator's zero: this hardware is always
+	 * perspective-correct, so TRUE is what an untouched context really is. */
+	context->PerspectiveMapping_State = GL_TRUE;
 
 	/* backend.fog_* -- matches fog.c's own field mapping. */
 	context->backend.fog_start   = 1.0f;
 	context->backend.fog_end     = 0.1f;
 	context->backend.fog_density = 1.0f;
+	/* GL's default fog colour is (0,0,0,0), so all four are zero -- fog_a
+	 * written explicitly rather than left to the allocator, like the other
+	 * three and like PolygonOffsetUnits below. */
 	context->backend.fog_r = context->backend.fog_g = context->backend.fog_b = 0;
+	context->backend.fog_a = 0;
 	context->FogRange           = 1.0;
 
 	/* Real OpenGL mandates GL_LESS as glDepthFunc's default even if the
@@ -2755,16 +3129,23 @@ GLboolean MGLInitContext(GLcontext context)
 	context->LockMode = MGL_LOCK_MANUAL;
 #endif
 
-	context->NoMipMapping = newNoMipMapping;
-	context->NoFallbackAlpha = newNoFallbackAlpha;
+	context->NoMipMapping = g_req.noMipMapping;
+	context->NoFallbackAlpha = g_req.noFallbackAlpha;
 
 	context->Idle = NULL;
 	context->MouseHandler = NULL;
 	context->SpecialHandler = NULL;
 	context->KeyHandler = NULL;
 
-	context->SrcAlpha = 0;
-	context->DstAlpha = 0;
+	/* GL's own blend-func defaults, matching what the backend's alpha modes
+	 * already start at (v3d_context.c). These are only read by the state
+	 * queries, and glBlendFuncSeparate early-outs on the mapped hardware
+	 * factors -- so a program that opens a context and asks for GL_ONE/GL_ZERO
+	 * never reaches the store, and zero here would have answered GL_ZERO for
+	 * the source. GL_ZERO happens to be 0, so only the source needed a value,
+	 * but both are written for the same reason PolygonOffsetUnits below is. */
+	context->SrcAlpha = GL_ONE;
+	context->DstAlpha = GL_ZERO;
 	context->AlphaFellBack = GL_FALSE;
 
 	context->WOne_Hint = GL_FALSE;
@@ -2785,6 +3166,7 @@ GLboolean MGLInitContext(GLcontext context)
 	/* Joe Sera: CurPolygonMode/CurShadeModel/CurBlendSrc/CurBlendDst here and
 	 * the CurUnpack* fields further down (MiniGL source). */
 	context->CurPolygonMode      = GL_FILL ;
+	context->CurPolygonModeBack  = GL_FILL ;
 	context->CurShadeModel       = GL_SMOOTH ;
 	context->CurBlendSrc         = GL_ONE ;
 	context->CurBlendDst         = GL_ZERO ;
@@ -2822,9 +3204,8 @@ GLboolean MGLInitContext(GLcontext context)
 	context->PackLsbFirst        = GL_FALSE;
 	context->PassContinuesSplit  = GL_FALSE;
 
-	/* Joe Sera: CurWriteMask/CurDepthTest (MiniGL source). */
-	context->CurWriteMask = GL_TRUE ;
-	context->CurDepthTest = GL_FALSE ;
+	context->unused_5 = GL_FALSE ;
+	context->unused_6 = GL_FALSE ;
 
 	/* Vertex array stuff */
 	context->ClientState        = 0;
@@ -2870,7 +3251,12 @@ GLboolean MGLInitContext(GLcontext context)
 
 	context->CurrentPointSize     = 1.f;
 	context->CurrentLineWidth     = 1.f;   /* GL's default width */
-	context->TexGenModeS = context->TexGenModeT = GL_SPHERE_MAP;
+	/* GL 1.1 2.10.4's own default, and a deviation would protect nobody: every
+	 * texgen caller in all six trees names its mode explicitly next to the
+	 * enable (the model-draw sites and scenes in the client applications, and
+	 * the gears demos), so nothing observes this value. The default planes
+	 * below are what makes it usable. */
+	context->TexGenModeS = context->TexGenModeT = GL_EYE_LINEAR;
 
 	/* GL's default current texture coordinate is (0,0,0,1), per unit. */
 	context->CurTexU0 = context->CurTexV0 = 0.f;
@@ -2885,11 +3271,19 @@ GLboolean MGLInitContext(GLcontext context)
 	context->CurrentIndex         = 1.f;
 	context->CurrentEdgeFlag      = GL_TRUE;
 	context->ReadBufferMode       = GL_FRONT;
+	context->DrawBufferMode       = GL_FRONT;
 	context->IndexArrayPointer    = NULL;
 	context->IndexArrayType       = GL_FLOAT;
 	context->IndexArrayStride     = 0;
 	context->EdgeFlagArrayPointer = NULL;
 	context->EdgeFlagArrayStride  = 0;
+	/* GL_NORMAL_ARRAY: disabled and unbound, GL's defaults. The gather tests
+	 * the pointer as well as the enable bit, so NULL here is what keeps an
+	 * enabled-but-unbound array from being read. */
+	context->NormalArrayPointer   = NULL;
+	context->NormalArrayType      = GL_FLOAT;
+	context->NormalArrayStride    = 0;
+	context->NormalArrayStep      = 3 * (GLint)sizeof(GLfloat);
 
 	/* The three state-only capabilities (context.h), all disabled by GL
 	 * default. */
@@ -2913,7 +3307,7 @@ GLboolean MGLInitContext(GLcontext context)
 
 	context->ClipFlags = (MGL_CLIP_NEGW | MGL_CLIP_FRONT | MGL_CLIP_BACK | MGL_CLIP_RIGHT | MGL_CLIP_LEFT | MGL_CLIP_BOTTOM | MGL_CLIP_TOP);
 
-	context->GuardBand	    = newGuardBand;
+	context->GuardBand	    = g_req.guardBand;
 
 	GLMatrixInit(context);
 
@@ -2943,7 +3337,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	if (v3d_mem_alloc(&tempDevice, &selfMem, sizeof(struct GLcontext_t)) < 0)
 	{
 		/* OF: this failure message (MiniGL source). */
-		printf("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t));
+		E(("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t)));
 		return NULL;
 	}
 	context = (GLcontext)selfMem.hostptr;
@@ -2952,25 +3346,25 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	context->device.sysbase = tempDevice.sysbase;
 	context->device.dosbase = (struct DOSBase*)DOSBase;
 
-	D(("MGLCreateContext: enter, w=%ld h=%ld windowMode=%ld\n", (LONG)w, (LONG)h, (LONG)newWindowMode));
+	D(("MGLCreateContext: enter, w=%ld h=%ld windowMode=%ld\n", (LONG)w, (LONG)h, (LONG)g_req.windowMode));
 
 	if (v3d_init(&context->device) != 0)
 	{
 		E(("MGLCreateContext: v3d_init failed\n"));
-		printf("Error: v3d_init failed\n");
+		E(("Error: v3d_init failed\n"));
 		v3d_mem_free(&context->device, &context->selfMem);
 		return NULL;
 	}
 	D(("MGLCreateContext: v3d_init OK\n"));
 
-	if (newWindowMode == GL_FALSE)
+	if (g_req.windowMode == GL_FALSE)
 	{
 		if (GL_FALSE == vid_OpenDisplay(context, w,h, GL_FALSE))
 		{
 			v3d_free(&context->device);
 			v3d_mem_free(&context->device, &context->selfMem);
 			E(("MGLCreateContext: vid_OpenDisplay failed\n"));
-			printf("Error: opening of display failed\n");
+			E(("Error: opening of display failed\n"));
 			return NULL;
 		}
 		D(("MGLCreateContext: vid_OpenDisplay OK\n"));
@@ -2982,7 +3376,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 			v3d_free(&context->device);
 			v3d_mem_free(&context->device, &context->selfMem);
 			E(("MGLCreateContext: vid_OpenWindow failed\n"));
-			printf("Error: opening of display failed\n");
+			E(("Error: opening of display failed\n"));
 			return NULL;
 		}
 		D(("MGLCreateContext: vid_OpenWindow OK\n"));
@@ -2991,7 +3385,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 	if (GL_FALSE == MGLInitContext(context))
 	{
 		E(("MGLCreateContext: MGLInitContext failed\n"));
-		printf("Error: initalisation of context failed\n");
+		E(("Error: initalisation of context failed\n"));
 		MGLDeleteContext(context);
 		return NULL;
 	}
@@ -2999,7 +3393,10 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
 
 	GLDepthRange(context, 0.0, 1.0);
 	GLViewport(context, offx, offy, w, h);
-	GLClearColor(context, 1.0, 1.0, 1.0, 1.0);
+	/* GL 1.1 table 6.5: the clear colour starts at (0,0,0,0). The original
+	 * MiniGL set it to opaque white here, which every app that clears before
+	 * calling glClearColor inherits. */
+	GLClearColor(context, 0.0, 0.0, 0.0, 0.0);
 
 	D(("MGLCreateContext: exit OK\n"));
 
@@ -3013,7 +3410,7 @@ void *MGLCreateContext(int offx, int offy, int w, int h)
  * that one difference obvious instead of hiding it behind a mode flag.
  *
  * mglChooseWindowMode is IGNORED here, and that is correct -- the caller has
- * settled the question by handing us a window. newWindowMode still governs
+ * settled the question by handing us a window. g_req.windowMode still governs
  * MGLCreateContext, which is the only place it ever meant anything.
  */
 void *MGLCreateContextFromWindow(struct Window *window)
@@ -3045,7 +3442,7 @@ void *MGLCreateContextFromWindow(struct Window *window)
 
 	if (v3d_mem_alloc(&tempDevice, &selfMem, sizeof(struct GLcontext_t)) < 0)
 	{
-		printf("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t));
+		E(("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t)));
 		return NULL;
 	}
 	context = (GLcontext)selfMem.hostptr;
@@ -3059,7 +3456,7 @@ void *MGLCreateContextFromWindow(struct Window *window)
 	if (v3d_init(&context->device) != 0)
 	{
 		E(("MGLCreateContextFromWindow: v3d_init failed\n"));
-		printf("Error: v3d_init failed\n");
+		E(("Error: v3d_init failed\n"));
 		v3d_mem_free(&context->device, &context->selfMem);
 		return NULL;
 	}
@@ -3069,21 +3466,22 @@ void *MGLCreateContextFromWindow(struct Window *window)
 		v3d_free(&context->device);
 		v3d_mem_free(&context->device, &context->selfMem);
 		E(("MGLCreateContextFromWindow: vid_AdoptWindow failed\n"));
-		printf("Error: could not render into the supplied window\n");
+		E(("Error: could not render into the supplied window\n"));
 		return NULL;
 	}
 
 	if (GL_FALSE == MGLInitContext(context))
 	{
 		E(("MGLCreateContextFromWindow: MGLInitContext failed\n"));
-		printf("Error: initalisation of context failed\n");
+		E(("Error: initalisation of context failed\n"));
 		MGLDeleteContext(context);
 		return NULL;
 	}
 
 	GLDepthRange(context, 0.0, 1.0);
 	GLViewport(context, 0, 0, w, h);
-	GLClearColor(context, 1.0, 1.0, 1.0, 1.0);
+	/* GL-conformant default, as in MGLCreateContext above. */
+	GLClearColor(context, 0.0, 0.0, 0.0, 0.0);
 
 	D(("MGLCreateContextFromWindow: exit OK\n"));
 
@@ -3126,7 +3524,7 @@ void *MGLCreateContextFromBitMap(struct BitMap *bitmap)
 
 	if (v3d_mem_alloc(&tempDevice, &selfMem, sizeof(struct GLcontext_t)) < 0)
 	{
-		printf("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t));
+		E(("Error: Can't get %lu bytes of memory for context\n", (unsigned long)sizeof(struct GLcontext_t)));
 		return NULL;
 	}
 	context = (GLcontext)selfMem.hostptr;
@@ -3140,7 +3538,7 @@ void *MGLCreateContextFromBitMap(struct BitMap *bitmap)
 	if (v3d_init(&context->device) != 0)
 	{
 		E(("MGLCreateContextFromBitMap: v3d_init failed\n"));
-		printf("Error: v3d_init failed\n");
+		E(("Error: v3d_init failed\n"));
 		v3d_mem_free(&context->device, &context->selfMem);
 		return NULL;
 	}
@@ -3150,21 +3548,22 @@ void *MGLCreateContextFromBitMap(struct BitMap *bitmap)
 		v3d_free(&context->device);
 		v3d_mem_free(&context->device, &context->selfMem);
 		E(("MGLCreateContextFromBitMap: vid_AdoptBitMap failed\n"));
-		printf("Error: could not render into the supplied bitmap\n");
+		E(("Error: could not render into the supplied bitmap\n"));
 		return NULL;
 	}
 
 	if (GL_FALSE == MGLInitContext(context))
 	{
 		E(("MGLCreateContextFromBitMap: MGLInitContext failed\n"));
-		printf("Error: initalisation of context failed\n");
+		E(("Error: initalisation of context failed\n"));
 		MGLDeleteContext(context);
 		return NULL;
 	}
 
 	GLDepthRange(context, 0.0, 1.0);
 	GLViewport(context, 0, 0, w, h);
-	GLClearColor(context, 1.0, 1.0, 1.0, 1.0);
+	/* GL-conformant default, as in MGLCreateContext above. */
+	GLClearColor(context, 0.0, 0.0, 0.0, 0.0);
 
 	D(("MGLCreateContextFromBitMap: exit OK\n"));
 
@@ -3182,14 +3581,14 @@ void MGLDeleteContext(GLcontext context)
 	if (context->v3dBitMap) vid_CloseWindow(context);
 	else                    vid_CloseDisplay(context, GL_FALSE);
 
-	/* Back to the single-buffer default for whoever creates the next
-	 * context. In the resident minigl.library this static outlives the
-	 * program that set it, so without the reset a later program that never
-	 * calls mglChooseNumberOfBuffers would open double-buffered with vsync in
-	 * a build with MGLV3D_DOUBLE_BUFFER_ENABLED=1 (0 by default, which pins
-	 * NumBuffers to 1 whatever this holds).
-	 * MGLResizeContext keeps the context and its setting. */
-	newNumberOfBuffers = 1;
+	/* Back to the documented defaults for whoever creates the next context.
+	 * In the resident minigl.library these statics outlive the program that
+	 * set them: without this a later program that never calls the setter
+	 * inherits the previous one's choice -- most visibly g_req.windowMode, which
+	 * would open a game WINDOWED because the program before it asked for that.
+	 * MGLResizeContext keeps the context and its settings, so it is unaffected;
+	 * none of these is read after context creation. */
+	vid_ResetRequests();
 
 	v3d_free(&context->device);
 
@@ -3209,15 +3608,52 @@ void MGLDeleteContext(GLcontext context)
 
 	{
 		extern void d_FreeSeq(void);
+		extern void d_FreeWire(void);
+		extern void dl_FreeAll(void);
 
 		d_FreeSeq();
+		d_FreeWire();
+		dl_FreeAll();
 	}
 
 	if (context->textureObjects) free(context->textureObjects);
 
 	if (context->GeneratedTextures) free (context->GeneratedTextures);
 
-	MGLTexMemStat(context, &current, &peak);
+	/* Allocated unconditionally at context creation whether a paletted texture
+	 * is ever uploaded or not, so every context leaked 1 KB. In the resident
+	 * minigl.library that accumulates across every program that runs. */
+	if (context->PaletteData) free(context->PaletteData);
+
+	{
+		extern void tex_ResetStats(void);
+
+		/* A non-zero current here is texture memory this context never gave
+		 * back. The counters are file statics, so they are reset too: in the
+		 * resident library the next program would inherit this one's peak. */
+		MGLTexMemStat(context, &current, &peak);
+		if (current != 0)
+			D(("Warning: %ld bytes of texture memory still charged at context delete\n",
+			       (long)current));
+		tex_ResetStats();
+	}
+
+	/*
+	 * THE CURRENT-CONTEXT POINTER DIES WITH THE CONTEXT. Everything above has
+	 * been freed, including the struct itself in the line below, so leaving
+	 * mini_CurrentContext pointing at it makes the next gl* call -- they all
+	 * dereference it through gl.h's macros -- read freed memory.
+	 *
+	 * In the resident minigl.library this matters beyond one program: the
+	 * pointer is a library-side global, so it OUTLIVES the process that set it
+	 * and the next program to run would start with it aimed at the dead one's
+	 * memory. glut.c already cleared it by hand for exactly this reason.
+	 *
+	 * Only when it is this context: deleting some other context must not
+	 * disturb a current one.
+	 */
+	if (mini_CurrentContext == context)
+		mini_CurrentContext = NULL;
 
 	v3d_mem_free(&context->device, &context->selfMem);
 }
@@ -3263,10 +3699,14 @@ void MGLSetState(GLcontext context, const GLenum cap, const GLboolean flag)
 			context->CullFace_State = flag;
 			break;
 		case GL_DEPTH_WRITEMASK:
-			context->CurWriteMask = flag ;
+			/*
+			 * DepthMask is the field that MATTERS: draw.c derives
+			 * z_updates_enable from DepthTest_State && DepthMask, and
+			 * mgl_QueryState answers GL_DEPTH_WRITEMASK from it.
+			 */
+			context->DepthMask = flag ;
 		break ;
 		case GL_DEPTH_TEST:
-			context->CurDepthTest = flag ;
 			context->DepthTest_State = flag;
 			v3d_update_depth_ez_dir(context);
 			break;
@@ -3277,8 +3717,10 @@ void MGLSetState(GLcontext context, const GLenum cap, const GLboolean flag)
 			context->PointSmooth_State = flag;
 			break;
 		case MGL_PERSPECTIVE_MAPPING:
-			/* No stored state even in the original, and no hardware
-			 * toggle exists here -- true no-op, see header comment. */
+			/* Stored only so glIsEnabled can answer it. No hardware toggle
+			 * exists: the non-perspective CL packet is never emitted, so
+			 * nothing reads this to render -- see the header comment. */
+			context->PerspectiveMapping_State = flag;
 			break;
 		case MGL_Z_OFFSET:
 			/* A flag of its own, separate from GL_POLYGON_OFFSET_FILL
@@ -3307,10 +3749,62 @@ void MGLSetState(GLcontext context, const GLenum cap, const GLboolean flag)
 		case GL_SHARED_TEXTURE_PALETTE_EXT:
 			context->SharedTexturePalette_State = flag;
 			break;
+
+		/* Lighting. The fold has to be redone on BOTH of these, not just on the
+		 * glLight/glMaterial setters, because LitBase sums the ambient of every
+		 * ENABLED light: switching a light on or off changes that sum without any
+		 * setter being called. The serial bump goes with it, or the uniform memo
+		 * in draw.c hands a second draw in the same frame the first draw's block.
+		 *
+		 * GL_LIGHTING and GL_LIGHTi are separate state and both are needed: GL
+		 * lights nothing with GL_LIGHTING off however many lights are on, and
+		 * lights only emission and the light-model ambient with GL_LIGHTING on
+		 * and every light off. */
+		case GL_LIGHTING:
+			/* No-change guard, and it is not micro-optimisation: gl_ClearViaQuad
+			 * forces this off and restores it around every quad-path clear, so a
+			 * game that never touches lighting would otherwise pay two folds per
+			 * clear forever. With the guard those two calls are both
+			 * GL_FALSE -> GL_FALSE and cost one comparison each. */
+			if (context->Lighting_State == flag)
+				break;
+
+			context->Lighting_State = flag;
+			context->LightSerial++;
+			light_Fold(context);
+			break;
+
+		case GL_COLOR_MATERIAL:
+			/* Same no-change guard as GL_LIGHTING: an application that toggles
+			 * this per object would otherwise pay a fold per toggle. */
+			if (context->ColorMaterial_State == flag)
+				break;
+
+			context->ColorMaterial_State = flag;
+			context->LightSerial++;
+			light_Fold(context);
+			break;
+
+		case GL_LIGHT0: case GL_LIGHT1: case GL_LIGHT2: case GL_LIGHT3:
+		case GL_LIGHT4: case GL_LIGHT5: case GL_LIGHT6: case GL_LIGHT7:
+		{
+			GLuint bit  = 1U << (cap - GL_LIGHT0);
+			GLuint want = flag ? bit : 0u;
+
+			if ((context->LightMask & bit) == want)
+				break;                  /* same guard as GL_LIGHTING above */
+
+			context->LightMask = flag ? (context->LightMask | bit)
+			                          : (context->LightMask & ~bit);
+
+			context->LightSerial++;
+			light_Fold(context);
+			break;
+		}
+
 		default:
-			/* A capability this driver does not implement, e.g.
-			 * glEnable(GL_LIGHTING). glGetError reports it as
-			 * GL_INVALID_ENUM; GLFlagError (gl.h) keeps an earlier error the
+			/* A capability this driver does not implement. glGetError reports it
+			 * as GL_INVALID_ENUM; GLFlagError (gl.h) keeps an earlier error the
 			 * application has not read yet, as GL specifies.
 			 *
 			 * No state changes and nothing is logged -- a game could make
@@ -3337,7 +3831,18 @@ void *MGLCreateContextFromID(GLint id, GLint *width, GLint *height)
 {
 	/* No V3D equivalent of Warp3D's ID-based context creation -- see this
 	 * file's header comment. MGLCreateContext (explicit w/h) is the real,
-	 * ported path. */
+	 * ported path.
+	 *
+	 * REFUSE HONESTLY. Returning NULL alone is not enough: a caller that
+	 * ignores the return value and uses the two outputs would read
+	 * uninitialised stack. Both are always written, so failure is
+	 * 0 x 0 -- a size that cannot be mistaken for a mode and fails visibly at
+	 * glViewport. The current-context global is deliberately NOT touched:
+	 * there is no context to make current, and clearing an existing one would
+	 * turn a failed call into a broken program. */
+	(void)id;
+	if (width)  *width  = 0;
+	if (height) *height = 0;
 	return NULL;
 }
 

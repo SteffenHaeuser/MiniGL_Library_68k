@@ -23,17 +23,16 @@
 
 #define CLAMP_COLORS 1
 
-/* USE_MGLAPI makes gl.h include mgl/minigl.h instead of defining the
-** gl* compatibility macros. minigl.h is not part of this tree.
+/* NO USE_MGLAPI OR NO_MGLMACROS SWITCH HERE. In Hyperion's MiniGL they select
+** an inline alternative to gl.h's gl* macros; this tree carries no such header
+** and defines neither name as a configuration choice.
+**
+** USE_MGLAPI itself is load-bearing, but only as a suppression: <libraries/
+** minigl_dispatch.h> defines it around its own includes so gl.h's gl* macro
+** block is hidden and its dispatch wrappers define those names instead. The
+** CLIENT copy of this header is kept in step with this file, copied over from
+** it rather than maintained separately. See gl.h.
 */
-
-//#define USE_MGLAPI 1
-
-#ifdef USE_MGLAPI
-	#define NO_MGLMACROS 1
-#else
-	#undef NO_MGLMACROS
-#endif
 
 
 // Stack sizes of the different matrix stacks

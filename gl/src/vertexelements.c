@@ -1,6 +1,9 @@
 /*
  * This file is part of the MiniGL library project
  * See the file Licence.txt for more details
+ *
+ * Originally MiniGL/src/vertexelements.c, (C) 1999 by Hyperion, revision
+ * 1.1.1.1 of 2000-04-07 by hfrieden.
  */
 
 /*
@@ -43,7 +46,6 @@
 #include "sysinc.h"
 #include "../../backend/hw/v3d_debug.h"
 
-static char rcsid[] = "$Id: vertexelements.c,v 1.1.1.1 2000/04/07 19:44:51 hfrieden Exp $";
 
 extern void d_DrawTriangles(GLcontext context);
 extern void d_DrawTriangleStrip(GLcontext context);
@@ -150,7 +152,25 @@ static __attribute__((noinline)) void GatherVertexFromIndex(GLcontext context, i
 
 	dst->bx = x; dst->by = y; dst->bz = z; dst->bw = w;
 	dst->v.x = x; dst->v.y = y; dst->v.z = z; dst->v.w = w;
-	dst->normal = 0;
+
+	/* GL_NORMAL_ARRAY, indexed by the SAME srcIndex the position used -- see
+	 * GatherVertexFromArray (vertexarray.c) for why the gathered normal goes
+	 * into NormalBuffer[dstIndex] and why slot 0 may be overwritten. Without
+	 * the array this stays 0, so an unlit indexed draw is unchanged. */
+	if ((context->ClientState & GLCS_NORMAL) && context->NormalArrayPointer != NULL)
+	{
+		const GLfloat *nsrc = (const GLfloat *)((const GLubyte *)context->NormalArrayPointer
+		                                        + srcIndex * context->NormalArrayStep);
+
+		context->NormalBuffer[dstIndex].x = nsrc[0];
+		context->NormalBuffer[dstIndex].y = nsrc[1];
+		context->NormalBuffer[dstIndex].z = nsrc[2];
+		dst->normal = dstIndex;
+	}
+	else
+	{
+		dst->normal = 0;
+	}
 	/* Real per-pixel Q perspective correction: same as vertexarray.c's
 	 * GatherVertexFromArray -- array-mode vertices never go through
 	 * GLTexCoord4f, so `.q` would otherwise be stale garbage from an

@@ -33,7 +33,6 @@
 #include "../../backend/hw/v3d_debug.h"
 
 
-static char rcsid[] UNUSED = "$Id: init.c,v 1.4 2001/12/25 00:55:26 tfrieden Exp $";
 
 //surgeon: added 11-04-02 - initializes glDrawArrays to glDrawElements wrapper for clipping with compiled arrays
 
@@ -50,6 +49,13 @@ extern struct ExecBase *SysBase;
 void MGL_SINCOS_Init(void);
 
 struct Library *CyberGfxBase = NULL;
+
+/* Which of the four bases above THIS driver opened, so MGLTerm closes only
+ * those. A host that opened one for itself keeps it: see MGLInit. */
+static GLboolean s_opened_intuition = GL_FALSE;
+static GLboolean s_opened_gfx       = GL_FALSE;
+static GLboolean s_opened_utility   = GL_FALSE;
+static GLboolean s_opened_cybergfx  = GL_FALSE;
 
 
 /* Stack-size check: AmigaOS gives each program its stack at LAUNCH time
@@ -90,11 +96,11 @@ static void mglv3d_CheckStackSize(void)
 
 	if (effectiveStack < MGLV3D_RECOMMENDED_MIN_STACK)
 	{
-		printf("MGLInit: WARNING -- current stack size is %lu bytes. This project has seen "
+		D(("MGLInit: WARNING -- current stack size is %lu bytes. This project has seen "
 		       "real crashes/hangs (usually affecting whatever runs NEXT, not this program "
 		       "itself) with a small stack -- recommend running 'Stack %ld' or larger before "
 		       "starting this program.\n",
-		       effectiveStack, (LONG)MGLV3D_RECOMMENDED_MIN_STACK);
+		       effectiveStack, (LONG)MGLV3D_RECOMMENDED_MIN_STACK));
 		D(("MGLInit: WARNING -- stack size %lu below recommended minimum %ld\n",
 		   effectiveStack, (LONG)MGLV3D_RECOMMENDED_MIN_STACK));
 	}
@@ -107,20 +113,57 @@ static void mglv3d_CheckStackSize(void)
 
 GLboolean MGLInit(void)
 {
+	extern void vid_ResetCloseDesktopRequest(void);
+
 	mglv3d_CheckStackSize();
 
-	IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 0L);
-	GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0L);
-	UtilityBase = OpenLibrary("utility.library", 0L);
-	CyberGfxBase = OpenLibrary("cybergraphics.library", 0L);
+	/* Per-program defaults. Every program calls MGLInit before the mglChoose*
+	 * setters, so this is where a request left behind by the previous program
+	 * in the resident library gets cleared. */
+	vid_ResetCloseDesktopRequest();
+
+	/*
+	 * OPEN ONLY WHAT IS NOT ALREADY OPEN, and remember which ones those were.
+	 *
+	 * These four are not the driver's private handles: in a statically linked
+	 * program they are the SAME globals the host's own proto/ inlines
+	 * dereference. A host that opened intuition.library for its own window had
+	 * its pointer overwritten here, and MGLTerm then closed and NULLed it --
+	 * so the host's next CloseWindow() went through a null base, after the
+	 * driver had finished and looked blameless.
+	 *
+	 * Opening a library twice is harmless in itself (OpenLibrary just bumps the
+	 * count and returns the same base), so the overwrite was survivable. NULLing
+	 * a base the driver did not open is not.
+	 */
+	if (!IntuitionBase)
+	{
+		IntuitionBase = (struct IntuitionBase *)OpenLibrary("intuition.library", 0L);
+		s_opened_intuition = (IntuitionBase != NULL);
+	}
+	if (!GfxBase)
+	{
+		GfxBase = (struct GfxBase *)OpenLibrary("graphics.library", 0L);
+		s_opened_gfx = (GfxBase != NULL);
+	}
+	if (!UtilityBase)
+	{
+		UtilityBase = OpenLibrary("utility.library", 0L);
+		s_opened_utility = (UtilityBase != NULL);
+	}
+	if (!CyberGfxBase)
+	{
+		CyberGfxBase = OpenLibrary("cybergraphics.library", 0L);
+		s_opened_cybergfx = (CyberGfxBase != NULL);
+	}
 
 	if (!IntuitionBase || !GfxBase || !UtilityBase || !CyberGfxBase)
 	{
-	    printf("Library initialization failed:\n");
+	    E(("Library initialization failed:\n"));
 
-	    if (!IntuitionBase) printf("- intuition.library (How are you doing this ?)\n");
-	    if (!GfxBase)       printf("- graphics.library (Strange!)\n");
-	    if (!CyberGfxBase)  printf("- cybergraphics.library\n");
+	    if (!IntuitionBase) E(("- intuition.library (How are you doing this ?)\n"));
+	    if (!GfxBase)       E(("- graphics.library (Strange!)\n"));
+	    if (!CyberGfxBase)  E(("- cybergraphics.library\n"));
 
 	    MGLTerm();
 	    return GL_FALSE;
@@ -139,15 +182,49 @@ GLboolean MGLInit(void)
 
 void MGLTerm(void)
 {
-	if (CyberGfxBase)       CloseLibrary(CyberGfxBase);
-	CyberGfxBase = NULL;
+	/* Same reason as MGLDeleteContext's own clear (context.c): the pointer is
+	 * a library-side global that outlives the process in the resident library,
+	 * and after this function the bases below are closed, so whatever it points
+	 * at is unusable. A program that terminates without deleting its context
+	 * would otherwise leave it aimed at that memory for the next one. */
+	{
+		extern GLcontext mini_CurrentContext;
 
-	if (IntuitionBase)      CloseLibrary((struct Library *)IntuitionBase);
-	IntuitionBase = NULL;
+		mini_CurrentContext = NULL;
+	}
 
-	if (GfxBase)            CloseLibrary((struct Library *)GfxBase);
-	GfxBase = NULL;
-
-	if (UtilityBase)        CloseLibrary(UtilityBase);
-	UtilityBase = NULL;
+	/*
+	 * Close and NULL only the bases this driver opened. The rest belong to the
+	 * host: in a static link they are the same globals its own proto/
+	 * inlines read, so nulling one left its next CloseWindow() or similar
+	 * dereferencing NULL -- after the driver had finished, which made it look
+	 * like the host's own bug.
+	 *
+	 * The flags are reset too, so a program that calls MGLInit again after
+	 * MGLTerm reopens whatever it needs rather than inheriting stale state.
+	 */
+	if (s_opened_cybergfx)
+	{
+		if (CyberGfxBase) CloseLibrary(CyberGfxBase);
+		CyberGfxBase = NULL;
+		s_opened_cybergfx = GL_FALSE;
+	}
+	if (s_opened_intuition)
+	{
+		if (IntuitionBase) CloseLibrary((struct Library *)IntuitionBase);
+		IntuitionBase = NULL;
+		s_opened_intuition = GL_FALSE;
+	}
+	if (s_opened_gfx)
+	{
+		if (GfxBase) CloseLibrary((struct Library *)GfxBase);
+		GfxBase = NULL;
+		s_opened_gfx = GL_FALSE;
+	}
+	if (s_opened_utility)
+	{
+		if (UtilityBase) CloseLibrary(UtilityBase);
+		UtilityBase = NULL;
+		s_opened_utility = GL_FALSE;
+	}
 }
