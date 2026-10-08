@@ -1,0 +1,90 @@
+# Classic V29 build. Historical filename retained for existing callers.
+# Uses the compiler on PATH; no RC9 or private cc1/modefix setup is assumed.
+.DEFAULT_GOAL := all
+.DELETE_ON_ERROR:
+CROSS ?= m68k-amigaos-
+CC := $(CROSS)gcc
+STRIP := $(CROSS)strip
+STRIP_OUTPUT ?= 0
+CRT ?= clib2
+ENTRY_MAKEFILE ?= Makefile_classic_verified.gcc
+BUILD_MAKEFILES := $(filter %.gcc,$(MAKEFILE_LIST))
+VARIANT ?= stock
+FAST_MATH ?= 0
+ifeq ($(FAST_MATH),0)
+MATH_FLAGS := -fno-fast-math
+MATH_SUFFIX := -nofastmath
+else ifeq ($(FAST_MATH),1)
+MATH_FLAGS := -ffast-math
+MATH_SUFFIX := -fastmath
+else
+$(error FAST_MATH must be 0 or 1)
+endif
+ifneq ($(STRIP_OUTPUT),0)
+ifneq ($(STRIP_OUTPUT),1)
+$(error STRIP_OUTPUT must be 0 or 1)
+endif
+endif
+# Fresh directories prevent reuse of objects from the old RC9/modefix recipe.
+OBJ := obj_v29_path_060_$(CRT)$(MATH_SUFFIX)/$(VARIANT)
+OUT := bin/v29-path-060-$(CRT)$(MATH_SUFFIX)/$(VARIANT)
+Q3 := ../mglQ3
+FLAGS := -std=c99 -m68060 -mhard-float -mcrt=$(CRT) -O3 $(MATH_FLAGS) \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow -fsigned-char \
+ -fno-baserel -fno-builtin -D__M68K__ -Wall -Wextra -g
+ifeq ($(VARIANT),ortho)
+FLAGS += -DMINIGL_CLASSIC_ORTHO
+else ifneq ($(VARIANT),stock)
+$(error VARIANT must be stock or ortho)
+endif
+INC := -I$(Q3)/include -Iinclude -Ilibrary
+Q3_NAMES := context vertexbuffer draw texture fog hclip init glu aclip vertexelements vertexarray others matrix
+LIB_NAMES := minigl_library dispatch_table_classic debug_output runtime_shim math_shim
+Q3_OBJS := $(addprefix $(OBJ)/q3/,$(addsuffix .o,$(Q3_NAMES)))
+LIB_OBJS := $(addprefix $(OBJ)/library/,$(addsuffix .o,$(LIB_NAMES)))
+# A libm implementation must not be folded into a call to itself.
+# Keep this rule in the common file so the libnix FLAGS override also inherits it.
+$(OBJ)/library/math_shim.o: FLAGS += -fno-builtin -fno-fast-math
+
+.PHONY: all variants checks FORCE
+all: $(OUT)/minigl.library check-math-shim
+variants:
+	$(MAKE) -f $(ENTRY_MAKEFILE) VARIANT=stock all checks
+	$(MAKE) -f $(ENTRY_MAKEFILE) VARIANT=ortho all checks
+$(OBJ)/q3/%.o: $(Q3)/src/%.c $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) $(FLAGS) $(INC) -MMD -MP -c $< -o $@
+$(OBJ)/library/%.o: library/%.c $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) $(FLAGS) $(INC) -DMINIGL_BACKEND_CLASSIC -DMINIGL_LIBRARY_BUILD -MMD -MP -c $< -o $@
+$(OUT)/minigl.library.debug: $(LIB_OBJS) $(Q3_OBJS) $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) -mcrt=$(CRT) -m68060 -mhard-float -nostdlib -nostartfiles -nodefaultlibs -noixemul \
+	 -Wl,-Map,$(OUT)/minigl.library.map -o $@ -Wl,--start-group $(LIB_OBJS) $(Q3_OBJS) -lm -lgcc -Wl,--end-group
+# A successful link need not be readable by this toolchain's standalone strip.
+# Preserve the linked output by default. Opt in only with a compatible strip.
+# FORCE also applies a changed STRIP_OUTPUT setting without relinking.
+$(OUT)/minigl.library: $(OUT)/minigl.library.debug FORCE
+ifeq ($(STRIP_OUTPUT),1)
+	$(STRIP) -o $@ $<
+else
+	cp $< $@
+endif
+FORCE:
+TESTFLAGS := -std=c99 -m68060 -mhard-float -mcrt=nix20 -O3 $(MATH_FLAGS) \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-builtin
+checks: $(OUT)/test-warp3d-vector $(OUT)/test-ortho $(OUT)/test-dispatch-abi
+$(OUT)/test-warp3d-vector: tests/test_warp3d_vector.c tests/test_warp3d_vector.s $(Q3)/include/inline/Warp3D.h $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) $(INC) $(filter %.c %.s,$^) -o $@
+$(OUT)/test-ortho: tests/test_ortho.c $(Q3)/src/transform_ortho.h $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) $< -lm -o $@
+$(OUT)/test-dispatch-abi: tests/test_dispatch_abi.c include/libraries/minigl_dispatch.h $(BUILD_MAKEFILES)
+	@mkdir -p $(@D)
+	$(CC) $(TESTFLAGS) -Iinclude $< -o $@
+-include $(LIB_OBJS:.o=.d) $(Q3_OBJS:.o=.d)
+
+.PHONY: check-math-shim
+check-math-shim: $(OBJ)/library/math_shim.o tests/check_math_shim.py
+	python3 tests/check_math_shim.py $(CROSS)objdump $(OBJ)/library/math_shim.o

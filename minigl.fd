@@ -1,0 +1,5 @@
+##base _MiniGLBase
+##bias 30
+* V10 dispatch ABI. All GL/MGL entry points are returned in MGLDispatchTable.
+MiniGLGetDispatchTableLVO()()
+##end

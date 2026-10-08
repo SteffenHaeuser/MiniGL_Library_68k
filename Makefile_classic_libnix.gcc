@@ -1,0 +1,16 @@
+# libnix variant of the user's full-fast-math build, using GCC from PATH.
+# Build stock and ortho separately with VARIANT=stock / VARIANT=ortho.
+FAST_MATH ?= 1
+CRT := nix20
+ENTRY_MAKEFILE := Makefile_classic_libnix.gcc
+include Makefile_classic_verified.gcc
+
+# Preserve this variant's original optimization flags. The common linker rule
+# uses the same CRT explicitly, without adding a compiler-search-path override.
+FLAGS := -std=c99 -m68060 -mhard-float -mcrt=$(CRT) -O3 $(MATH_FLAGS) \
+ -fomit-frame-pointer -fno-strict-aliasing -fno-strict-overflow -fsigned-char \
+ -D__M68K__ -g
+ifeq ($(VARIANT),ortho)
+FLAGS += -DMINIGL_CLASSIC_ORTHO
+endif
+$(OBJ)/library/debug_output.o $(OBJ)/library/runtime_shim.o: FLAGS += -fno-builtin
