@@ -113,6 +113,7 @@ MGLAPI void glColor3f(GLfloat red, GLfloat green, GLfloat blue)
 
 MGLAPI void glColor3fv(GLfloat *v)
 {
+    if (!v) return;
 	GLfloat red, green, blue;
 
 	red	= v[0];
@@ -136,6 +137,7 @@ MGLAPI void glColor3fv(GLfloat *v)
 
 MGLAPI void glColor3ubv(GLubyte *v)
 {
+    if (!v) return;
 	const W3D_Float f = 1.f/255.f;
 	CC->CurrentColor.r = (W3D_Float)v[0]*f;
 	CC->CurrentColor.g = (W3D_Float)v[1]*f;
@@ -176,6 +178,7 @@ MGLAPI void glColor4f(GLfloat red, GLfloat green, GLfloat blue, GLfloat alpha)
 
 MGLAPI void glColor4fv(GLfloat *v)
 {
+    if (!v) return;
 	GLfloat red, green, blue, alpha;
 
 	red	= v[0];
@@ -212,6 +215,7 @@ MGLAPI void glColor4ub(GLubyte red, GLubyte green, GLubyte blue, GLubyte alpha)
 
 MGLAPI void glColor4ubv(GLubyte *v)
 {
+    if (!v) return;
 	const W3D_Float f = 1.f/255.f;
 	CC->CurrentColor.r = (W3D_Float)v[0]*f;
 	CC->CurrentColor.g = (W3D_Float)v[1]*f;
@@ -355,6 +359,11 @@ MGLAPI void glMultMatrixf(const GLfloat *m)
 	GLMultMatrixf(CC, m);
 }
 
+MGLAPI void glNormal3fv(GLfloat *v)
+{
+    GLNormal3fv(CC, v);
+}
+
 MGLAPI void glNormal3f(GLfloat x, GLfloat y, GLfloat z)
 {
 	GLuint nbp = ++CC->NormalBufferPointer;
@@ -445,6 +454,7 @@ MGLAPI void glTexCoord2f(GLfloat s, GLfloat t)
 
 MGLAPI void glTexCoord2fv(GLfloat *v)
 {
+    if (!v) return;
 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
 
 	thisvertex.v.u = (W3D_Float)v[0];
@@ -468,6 +478,7 @@ MGLAPI void glTexCoord4f(GLfloat s, GLfloat t, GLfloat r, GLfloat q)
 
 MGLAPI void glTexCoord4fv(GLfloat *v)
 {
+    if (!v) return;
 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
 
 	thisvertex.v.u = (W3D_Float)(v[0]/v[3]);
@@ -550,6 +561,7 @@ MGLAPI void glVertex2f(GLfloat x, GLfloat y)
 
 MGLAPI void glVertex2fv(GLfloat *v)
 {
+    if (!v) return;
 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
 
 	thisvertex.bx = v[0];
@@ -598,6 +610,7 @@ MGLAPI void glVertex3f(GLfloat x, GLfloat y, GLfloat z)
 
 MGLAPI void glVertex3fv(GLfloat *v)
 {
+    if (!v) return;
 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
 
 	thisvertex.bx = v[0];
@@ -646,6 +659,7 @@ MGLAPI void glVertex4f(GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 
 MGLAPI void glVertex4fv(GLfloat *v)
 {
+    if (!v) return;
 	#define thisvertex CC->VertexBuffer[CC->VertexBufferPointer]
 
 	thisvertex.bx = v[0];
@@ -957,6 +971,7 @@ MGLAPI void glMultiTexCoord2fARB(GLenum unit, GLfloat s, GLfloat t)
 
 MGLAPI void glMultiTexCoord2fvARB(GLenum unit, GLfloat *v)
 {
+    if (!v) return;
 	int u = unit - GL_TEXTURE0_ARB;
 
 	if(u<0 || u>MAX_TEXUNIT)

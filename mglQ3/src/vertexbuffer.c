@@ -16,7 +16,7 @@
 Surgeon:
 
 Changes to vertexbuffer building API:
-- added MGL_FLATSTRIP primitive similar to MGL_FLATFAN
+- legacy device-coordinate flat primitives removed in 29.1
 - reduced memory-reads/writes
 - implemented a normalbuffer instead of pr-vertex normals
 - texcoords are multiplied with width/height after culling.
@@ -53,12 +53,6 @@ extern void d_DrawNormalPoly	(GLcontext context);
 extern void d_DrawSmoothPoly	(GLcontext context);
 extern void d_DrawMtexPoly	(GLcontext context);
 extern void d_DrawQuadStrip	(GLcontext context);
-   #if 0
-extern void d_DrawFlatFan	(GLcontext context);
-extern void d_DrawFlatStrip	(GLcontext context);
-   #else
-extern void d_DrawFlat		(GLcontext context);
-   #endif
 
 #else
 
@@ -74,12 +68,6 @@ extern void d_DrawSmoothPoly	(struct GLcontext_t);
 extern void d_DrawMtexPoly	(struct GLcontext_t);
 extern void d_DrawQuadStrip	(struct GLcontext_t);
 extern void d_DrawTrianglesVA	(struct GLcontext_t);
-   #if 0
-extern void d_DrawFlatFan	(struct GLcontext_t);
-extern void d_DrawFlatStrip	(struct GLcontext_t);
-   #else
- extern void d_DrawFlat		(struct GLcontext_t);
-   #endif
 #endif
 
 extern void tex_ConvertTexture	(GLcontext);
@@ -189,8 +177,6 @@ void GLBegin(GLcontext context, GLenum mode)
 {
 	// GLFlagError(context, context->CurrentPrimitive != GL_BASE, GL_INVALID_OPERATION);
 
-	context->CurrentTexQValid = GL_FALSE; //Surgeon
-	context->VertexBufferPointer = 0;
 
 	switch((int)mode)
 	{
@@ -264,23 +250,14 @@ void GLBegin(GLcontext context, GLenum mode)
 
 			break;
 
-		case MGL_FLATFAN:
-			//LOG(1, glBegin, "MGL_FLATFAN");
-			context->CurrentPrimitive = mode;
-			context->CurrentDraw = (DrawFn)d_DrawFlat;
-			break;
-
-		case MGL_FLATSTRIP:
-			//LOG(1, glBegin, "MGL_FLATSTRIP");
-			context->CurrentPrimitive = mode;
-			context->CurrentDraw = (DrawFn)d_DrawFlat;
-			break;
-
 		default:
-			//LOG(1, glBegin, "Error GL_INVALID_OPERATION");
-			GLFlagError (context, 1, GL_INVALID_OPERATION);
-			break;
+			if (context->CurrentError == GL_NO_ERROR)
+				context->CurrentError = GL_INVALID_ENUM;
+			return;
 	}
+
+	context->CurrentTexQValid = GL_FALSE;
+	context->VertexBufferPointer = 0;
 
 	//warp Current Normal
 
@@ -393,6 +370,7 @@ void GLColor3f(GLcontext context, GLfloat red, GLfloat green, GLfloat blue)
 
 void GLColor4fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	//LOG(2, glColor4fv, "%f %f %f %f", v[0], v[1], v[2], v[3]);
 
 	W3D_Float red	= v[0];
@@ -423,6 +401,7 @@ void GLColor4fv(GLcontext context, GLfloat *v)
 
 void GLColor3fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	//LOG(2, glColor3fv, "%f %f %f", v[0], v[1], v[2]);
 
 	W3D_Float red	= v[0];
@@ -479,6 +458,7 @@ void GLColor3ub(GLcontext context, GLubyte red, GLubyte green, GLubyte blue)
 
 void GLColor4ubv(GLcontext context, GLubyte *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	register W3D_Float f = 1/255.0;
 
 	//LOG(2, glColor4ubv, "%f %f %f %f", v[0]*f, v[1]*f, v[2]*f, v[3]*f);
@@ -493,6 +473,7 @@ void GLColor4ubv(GLcontext context, GLubyte *v)
 
 void GLColor3ubv(GLcontext context, GLubyte *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	register W3D_Float f = 1/255.0;
 	//LOG(2, glColor3ubv, "%f %f %f", v[0]*f, v[1]*f, v[2]*f);
 
@@ -518,6 +499,8 @@ void GLNormal3f(GLcontext context, GLfloat x, GLfloat y, GLfloat z)
 
 void GLNormal3fv(GLcontext context, GLfloat *n)
 {
+    if (!n) return;
+    GLNormal3f(context, n[0], n[1], n[2]);
 }
 
 #define CURRENTVERT context->VertexBuffer[context->VertexBufferPointer]
@@ -526,7 +509,7 @@ void GLMultiTexCoord2fARB(GLcontext context, GLenum unit, GLfloat s, GLfloat t)
 {
 	int u = unit - GL_TEXTURE0_ARB;
 
-	if(u<0 || u>MAX_TEXUNIT)
+	if(u<0 || u>=MAX_TEXUNIT)
 		return;
 
 	if(u)
@@ -544,9 +527,10 @@ void GLMultiTexCoord2fARB(GLcontext context, GLenum unit, GLfloat s, GLfloat t)
 
 void GLMultiTexCoord2fvARB(GLcontext context, GLenum unit, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	int u = unit - GL_TEXTURE0_ARB;
 
-	if(u<0 || u>MAX_TEXUNIT)
+	if(u<0 || u>=MAX_TEXUNIT)
 		return;
 
 	if(u)
@@ -576,6 +560,7 @@ void GLTexCoord2f(GLcontext context, GLfloat s, GLfloat t)
 
 void GLTexCoord2fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	#define thisvertex context->VertexBuffer[context->VertexBufferPointer]
 
 	thisvertex.v.u = (W3D_Float)v[0];
@@ -601,6 +586,7 @@ void GLTexCoord4f(GLcontext context, GLfloat s, GLfloat t, GLfloat r, GLfloat q)
 
 void GLTexCoord4fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	#define thisvertex context->VertexBuffer[context->VertexBufferPointer]
 
 	thisvertex.v.u = (W3D_Float)v[1]/(W3D_Float)v[3];
@@ -640,6 +626,7 @@ void GLVertex4f(GLcontext context, GLfloat x, GLfloat y, GLfloat z, GLfloat w)
 
 void GLVertex4fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	#define thisvertex context->VertexBuffer[context->VertexBufferPointer]
 
 	if(context->ShadeModel == GL_SMOOTH)
@@ -664,6 +651,7 @@ void GLVertex4fv(GLcontext context, GLfloat *v)
 
 void GLVertex3fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	#define thisvertex context->VertexBuffer[context->VertexBufferPointer]
 
 	if(context->ShadeModel == GL_SMOOTH)
@@ -714,6 +702,7 @@ void GLVertex2f(GLcontext context, GLfloat x, GLfloat y)
 
 void GLVertex2fv(GLcontext context, GLfloat *v)
 {
+    if (!v) return; /* 29.1: preserve all state for NULL vectors. */
 	#define thisvertex context->VertexBuffer[context->VertexBufferPointer]
 
 	if(context->ShadeModel == GL_SMOOTH)

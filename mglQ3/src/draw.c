@@ -65,11 +65,8 @@ void d_DrawSmoothPoly	(GLcontext);
 void d_DrawNormalPoly	(GLcontext);
 void d_DrawQuadStrip	(GLcontext);
 void d_DrawTrianglesVA	(GLcontext); //Surgeon
-void d_DrawFlat		(GLcontext);
 
 #if 0
-void d_DrawFlatFan	(GLcontext);
-void d_DrawFlatStrip	(GLcontext);
 #endif
 
 INLINE GLvoid v_Transform(GLcontext context);
@@ -3923,56 +3920,9 @@ void d_DrawTrianglesVA(GLcontext context)
 }
 
 
-/*
-** A MGL_FLATFAN / MGL_FLATSTRIP is a triangle fan or strip
-** that is specified in device corrdinates and is drawn
-** regardless of current matrix or viewport
-**
-** Very useful for bypassing the transformation pipeline 
-**
-*/
+/* 29.1: device-coordinate flat draw path removed. */
 
-void d_DrawFlat(GLcontext context)
-{
-	int	i;
-	static	W3D_Vertex *verts[MGL_MAXVERTS];
-	static	W3D_TrianglesV tris;
 
-	if(context->VertexBufferPointer < 3)
-		return; //invalid vertexcount;
-
-	PrepTexCoords(context, 0, context->VertexBufferPointer, GL_FALSE);
-
-	for (i=0; i<context->VertexBufferPointer; i++)
-	{
-		verts[i] = &context->VertexBuffer[i].v;
-
-		context->VertexBuffer[i].v.x = (W3D_Float) context->VertexBuffer[i].bx;
-		context->VertexBuffer[i].v.y = (W3D_Float) context->VertexBuffer[i].by;
-		context->VertexBuffer[i].v.z = (W3D_Double) context->VertexBuffer[i].bz;
-		context->VertexBuffer[i].v.w = (W3D_Float) context->VertexBuffer[i].bw;
-
-	}
-
-	tris.tex = context->w3dTexBuffer[context->CurrentBinding];
-	tris.st_pattern = NULL;
-	tris.v = verts;
-	tris.vertexcount = context->VertexBufferPointer;
-
-	#ifndef NODRAW
-
-	if(context->CurrentPrimitive == MGL_FLATSTRIP)
-	{
-		W3D_DrawTriStripV(context->w3dContext, &tris);
-	}
-
-	else	// MGL_FLATFAN
-	{
-		W3D_DrawTriFanV(context->w3dContext, &tris);
-	}
-
-	#endif
-}
 
 void dh_DrawPoly(GLcontext context, MGLPolygon *poly)
 {

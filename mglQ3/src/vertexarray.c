@@ -66,7 +66,7 @@ NOTE:
 
 Transformation and clipping pipeline can be turned on/off with glDisable/glEnable(MGL_ARRAY_TRANSFORMATIONS) before the pointers are set.
 
-The MGL_FLATFAN will work regardless of pipeline state.
+Legacy device-coordinate flat modes are no longer supported.
 
 Tricky stuff:
 
@@ -100,7 +100,6 @@ static void A_DrawQuadStrip	(GLcontext context, int first, int count);
 static void A_DrawTriFan	(GLcontext context, int first, int count);
 static void A_DrawTriStrip	(GLcontext context, int first, int count);
 static void A_DrawTriangles	(GLcontext context, int first, int count);
-static void A_DrawFlatFan	(GLcontext context, int first, int count);
 
 
 extern void TMA_Start(LockTimeHandle *handle);
@@ -1889,73 +1888,7 @@ static void A_DrawTriangles(GLcontext context, int first, int count)
 }
 
 
-static void A_DrawFlatFan(GLcontext context, int first, int count)
-{
-	int	i;
-	MGLVertex *v;
-	UBYTE	*Vpointer;
-	UBYTE	*Wpointer;
-	float	*W;
-	int	Vstride;
-	int	Wstride;
 
-	Vstride = context->ArrayPointer.vertexstride;
-	Wstride = context->ArrayPointer.texcoordstride;
-
-	Wpointer = context->ArrayPointer.w_buffer + first * Wstride;
-	Vpointer = context->ArrayPointer.verts + first * Vstride;
-
-	v = &context->VertexBuffer[0];
-
-	#if defined(FIXPOINT)
-
-	if(context->ArrayPointer.state & AP_FIXPOINT)
-	{
-		int *V;
-		i = count;
-
-		do
-		{
-			V = (int*)Vpointer;
-
-			v->bx = (float)V[0];
-			v->by = (float)V[1];
-			v->bz = (float)V[2];
-
-			W = (float*)Wpointer;
-			*W = 1.0;
-
-			v++; Vpointer += Vstride; Wpointer += Wstride;
-
-		} while (--i);
-	}
-
-	else
-
-	#endif //
-
-	{
-		float *V;
-		i = count;
-
-		do
-		{
-			V = (float*)Vpointer;
-
-			v->bx = V[0];
-			v->by = V[1];
-			v->bz = V[2];
-
-			W = (float*)Wpointer;
-			*W = 1.0;
-
-			v++; Vpointer += Vstride; Wpointer += Wstride;
-
-		} while (--i);
-	}
-
-	W3D_DrawArray(context->w3dContext, W3D_PRIMITIVE_TRIFAN, first, count);
-}
 
 //end of pipeline
 
@@ -2612,6 +2545,11 @@ static void A_DrawDirect(GLcontext context, int first, int count)
 
 void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 {
+    /* Removed SDK modes must not reach the release-build default fan path. */
+    if (mode == 0x7013 || mode == 0x7014) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 	static ADrawfn	A_Draw;
 	MGLVertex	*offset;
 
@@ -2735,9 +2673,6 @@ void GLDrawArrays(GLcontext context, GLenum mode, GLint first, GLsizei count)
 	{
 		switch(mode)
 		{
-			case MGL_FLATFAN:
-				A_Draw = (ADrawfn)A_DrawFlatFan;
-				break;
 
 			case GL_QUADS:
 				A_Draw = (ADrawfn)A_DrawQuads;

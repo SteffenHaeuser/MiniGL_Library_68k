@@ -40,7 +40,6 @@ static void E_DrawQuadStrip	(GLcontext context, const int count, UWORD *idx);
 static void E_DrawTriFan	(GLcontext context, const int count, UWORD *idx);
 static void E_DrawTriStrip	(GLcontext context, const int count, const UWORD *idx);
 static void E_DrawTriangles	(GLcontext context, const int count, const UWORD *idx);
-static void E_DrawFlatFan	(GLcontext context, const int count, const UWORD *idx);
 
 static PolyBuffer clipbuffer[MGL_MAXVERTS>>2];
 
@@ -2467,41 +2466,7 @@ static void E_DrawTriangles(GLcontext context, const int count, const UWORD *idx
 	}
 }
 
-static void E_DrawFlatFan(GLcontext context, const int count, const UWORD *idx)
-{
-	int	i;
-	int	vnum;
-	MGLVertex *v;
-	float	*W;
-	float	*V;
-	int	Vstride;
-	int	offs;
 
-	offs	= context->ArrayPointer.transformed;
-	Vstride = context->ArrayPointer.vertexstride;
-
-	i = 0;
-
-	do
-	{
-		vnum = idx[i];
-		v = &context->VertexBuffer[offs+vnum];
-		V = (float*)(context->ArrayPointer.verts + vnum * Vstride);
-
-		v->v.x = V[0];
-		v->v.y = V[1];
-		v->v.z = V[2];
-
-		W = (float*)(context->ArrayPointer.w_buffer + vnum * context->ArrayPointer.texcoordstride);
-		*W = 1.0;
-
-		i++;
-
-	} while (i < count);
-
-	//error = W3D_DrawElements(context->w3dContext, W3D_PRIMITIVE_TRIFAN, W3D_INDEX_UWORD, count, (void *)idx);
-	W3D_DrawElements(context->w3dContext, W3D_PRIMITIVE_TRIANGLES, W3D_INDEX_UWORD, count, (void *)idx); // test Quake3 - Cowcat
-}
 
 //Range guardband-check added 18-05-02 (surgeon)
 
@@ -2869,6 +2834,11 @@ static void E_DrawNULL(GLcontext context, const int count, const UWORD*idx)
 
 void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, const GLvoid *indices)
 {
+    /* Removed SDK modes must not reach the release-build default fan path. */
+    if (mode == 0x7013 || mode == 0x7014) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 	int	i;
 	UBYTE	*ub;
 	ULONG	*ul;
@@ -3022,9 +2992,6 @@ void GLDrawElements(GLcontext context, GLenum mode, GLsizei count, GLenum type, 
 	{
 		switch(mode)
 		{
-			case MGL_FLATFAN:
-				E_Draw = (EDrawfn)E_DrawFlatFan;
-				break;
 
 			case GL_QUADS:
 				E_Draw = (EDrawfn)E_DrawQuads;

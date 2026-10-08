@@ -6,7 +6,7 @@ OBJDIR ?= obj_gcc
 LIBNAME ?= libmgl-q3.a
 
 COMMON_CFLAGS = -std=c99 -mcpu=$(CPU) -mhard-float -mcrt=clib2 \
-	-O2 -ffast-math -fomit-frame-pointer -fno-strict-aliasing \
+	-O2 -fno-fast-math -fomit-frame-pointer -fno-strict-aliasing \
 	-fno-strict-overflow -fsigned-char -D__M68K__
 CFLAGS = $(COMMON_CFLAGS) -Iinclude -Wall -Wextra
 
@@ -22,8 +22,8 @@ all: $(LIBNAME)
 $(OBJDIR):
 	mkdir -p $@
 
-$(OBJDIR)/%.o: src/%.c | $(OBJDIR)
-	$(CC) $(CFLAGS) -c $< -o $@
+$(OBJDIR)/%.o: src/%.c makefile | $(OBJDIR)
+	$(CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
 $(LIBNAME): $(LIB_OBJS)
 	mkdir -p $(dir $@)
@@ -33,3 +33,5 @@ $(LIBNAME): $(LIB_OBJS)
 clean:
 	rm -rf $(OBJDIR)
 	rm -f $(LIBNAME)
+
+-include $(LIB_OBJS:.o=.d)

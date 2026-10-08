@@ -41,6 +41,10 @@ extern struct Library *Warp3DBase;
  * graphics.library base is defined in init.c and opened by MGLInit(). */
 extern struct GfxBase *GfxBase;
 
+/* The GCC 68k inline/dos.h header uses DOSBase but does not declare it.
+ * The resident library owns this base; do not define another copy here. */
+extern struct DosLibrary *DOSBase;
+
 #if defined(__GNUC__)
 #define UNUSED  __attribute__ ((unused))
 #else

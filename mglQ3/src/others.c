@@ -22,8 +22,9 @@
  * Do not cache this globally: minigl.library is shared by applications. */
 static GLint ConfiguredMaxTextureSize(void)
 {
-	char value[32];
-	LONG length = GetVar("MINIGL_MAX_TEXTURE_SIZE", value, sizeof(value), 0);
+	UBYTE value[32];
+	LONG length = GetVar((CONST_STRPTR)"MINIGL_MAX_TEXTURE_SIZE", value,
+	                     (LONG)sizeof(value), 0);
 	LONG i = 0;
 	GLint limit = 0;
 	if (length <= 0 || length >= (LONG)sizeof(value) - 1)

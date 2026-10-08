@@ -1896,7 +1896,10 @@ void GLColorTable(GLcontext context, GLenum target, GLenum internalformat, GLint
 
 void GLActiveTextureARB(GLcontext context, GLenum unit)
 {
-	GLFlagError(context, (unit < GL_TEXTURE0_ARB || unit > (GL_TEXTURE0_ARB+MAX_TEXUNIT)), GL_INVALID_ENUM);
+	if (unit < GL_TEXTURE0_ARB || unit >= GL_TEXTURE0_ARB + MAX_TEXUNIT) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
 
 	context->ActiveTexture = unit - GL_TEXTURE0_ARB;
 }
