@@ -23,65 +23,45 @@
 
 #define CLAMP_COLORS 1
 
-/* This define enables some sanity-checks for vertexarrays.
+/* USE_MGLAPI and NO_MGLMACROS are gone (2026-09-29). They selected an inline
+** alternative to gl.h's gl* macros, inherited from Hyperion's MiniGL; nothing
+** in this tree ever defined the switch, so the header behind it was never
+** compiled and had silently drifted out of parity with the driver.
 **
-** If disabled, make sure that the following is in "sync":
-**
-** - glShadeModel, glColorPointer and GL_COLOR_ARRAY
-**
-** - GL_TEXTURE_2D, glTexCoordPointer and
-**   GL_TEXTURE_COORD_ARRAY
-**
+** The CLIENT copy kept them until 2026-10-03, because <libraries/
+** minigl_dispatch.h> did define USE_MGLAPI -- which is what made the client
+** header a fork of this one. It does not any more: every gl* macro here now
+** resolves to a dispatch-wrapped name, so the suppression has nothing left to
+** do and the client header is a verbatim copy of this file. See gl.h.
 */
-
-//#define VA_SANITY_CHECK 1
-
-
-/* define if you want to use static inline functions instead
-** of macros
-*/
-
-//#define USE_MGLAPI 1
-
-//this tells mglmacros.h not to replace the API:
-
-#ifdef USE_MGLAPI
-	#define NO_MGLMACROS 1
-#else
-	#undef NO_MGLMACROS
-#endif
 
 
 // Stack sizes of the different matrix stacks
 
 #define MODELVIEW_STACK_SIZE    40
 #define PROJECTION_STACK_SIZE  5
+/* GL 1.1 requires at least 2 for the texture matrix stack. */
+#define TEXTURE_STACK_SIZE     10
 
 // Define this to make mglLockMode available
 #define AUTOMATIC_LOCKING_ENABLE 1
 
-// Define this is you don't want the ability to log GL calls
+// Left undefined, gl.h declares MGLDebugLevel and the mglSetDebugLevel() macro
 #define NLOGGING 1
 
 // Define if you don't want debugging
 #define GLNDEBUG 1
 
-// Define if you don't want glGetError functionality. Left undefined since
-// 2026-09-13: every check records its error for glGetError. Defining it
-// again silences the reports only -- each call site stops on its own.
+// Define if you don't want glGetError functionality. Left undefined:
+// every check records its error for glGetError. Defining it silences
+// the reports only -- each call site stops on its own.
 // #define GL_NOERRORCHECK 1
 
 
-// Define if you don't want to check if the bitmaps allocated for
-// screen buffering are cybergraphics bitmaps
 #define NCGXDEBUG 1
 
-// define if you don't want to draw anything
-// #define NODRAW
-
-// Maximum number of vertices a primitive can have
-// Raise this value if needed, but this *should* really be enough.
-
+// Bounds a clip polygon (MGLPolygon.verts), draw.c's color-batch slots and
+// the chunk size of vertex-array draws (vertexarray.c, vertexelements.c)
 #define MGL_MAXVERTS 1024
 
 #endif

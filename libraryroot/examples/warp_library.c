@@ -5,7 +5,6 @@
 
 */
 #include <proto/minigl.h>
-#include <clib/minigl_open_protos.h>
 #include <math.h>
 
 #include <stdlib.h>
@@ -153,15 +152,15 @@ static void drawFlare(GLint texnum)
     glBindTexture(GL_TEXTURE_2D, texnum);
     glEnable(GL_BLEND);
     glBlendFunc(GL_ONE, GL_ONE);
-    /*
-    ** An MGL_FLATFAN is a shortcut to draw something into the
-    ** screen that does not go through the transformation pipeline.
-    ** This is also not clipped, so you have to take care to avoid
-    ** going over the edges, or clip yourself.
-
-
-    */
-    glBegin(MGL_FLATFAN);
+    /* Pixel coordinates now use the standard transformation pipeline. */
+    glMatrixMode(GL_PROJECTION);
+    glPushMatrix();
+    glLoadIdentity();
+    glOrtho(0.0, (GLdouble)width, (GLdouble)height, 0.0, -1.0, 1.0);
+    glMatrixMode(GL_MODELVIEW);
+    glPushMatrix();
+    glLoadIdentity();
+    glBegin(GL_TRIANGLE_FAN);
         glTexCoord2f(0.0, 0.0);
         glVertex2f(x,y);
         glTexCoord2f(1.0, 0.0);
@@ -171,6 +170,10 @@ static void drawFlare(GLint texnum)
         glTexCoord2f(0.0, 1.0);
         glVertex2f(x,y+h);
     glEnd();
+    glMatrixMode(GL_PROJECTION);
+    glPopMatrix();
+    glMatrixMode(GL_MODELVIEW);
+    glPopMatrix();
     glDisable(GL_BLEND);
 }
 

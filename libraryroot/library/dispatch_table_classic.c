@@ -24,9 +24,10 @@ static void ClassicStub_mglProhibitMipMapping(GLboolean flag) { (void)0; }
 
 /* The Classic Q3 backend declares MGLResizeContext, but its implementation in
  * context.c is disabled with #if 0 and therefore exports no such symbol. */
-static void ClassicStub_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
+static GLboolean ClassicStub_MGLResizeContext(GLcontext context, GLsizei width, GLsizei height)
 {
     (void)context; (void)width; (void)height;
+    return GL_FALSE; /* V29 reports that no resize took place. */
 }
 
 static void ClassicStub_GLPolygonOffset(GLcontext context, GLfloat factor, GLfloat units)
@@ -123,6 +124,98 @@ static void ClassicStub_GLBlendFuncSeparate(GLcontext context, GLenum srcRGB, GL
      * rather than dropping the call entirely. */
     GLBlendFunc(context, srcRGB, dstRGB);
 }
+
+/* New unsupported core GL entry points report failure without changing state.
+ * Do not use GLFlagError: Classic's release config compiles that macro out. */
+static void ClassicUnsupported(GLcontext context)
+{
+    if (context && context->CurrentError == GL_NO_ERROR)
+        context->CurrentError = GL_INVALID_OPERATION;
+}
+
+/* Stub bodies for the 47 entries appended for 28.0. Base MiniGL has no
+ * lighting, no display lists, no GLU quadrics and no GLUT at all. */
+static void ClassicStub_GLLightf(GLcontext context, GLenum light, GLenum pname, GLfloat param) { (void)context; (void)light; (void)pname; (void)param;  ClassicUnsupported(context); }
+static void ClassicStub_GLLightfv(GLcontext context, GLenum light, GLenum pname, const GLfloat *params) { (void)context; (void)light; (void)pname; (void)params;  ClassicUnsupported(context); }
+static void ClassicStub_GLMaterialf(GLcontext context, GLenum face, GLenum pname, GLfloat param) { (void)context; (void)face; (void)pname; (void)param;  ClassicUnsupported(context); }
+static void ClassicStub_GLMaterialfv(GLcontext context, GLenum face, GLenum pname, const GLfloat *params) { (void)context; (void)face; (void)pname; (void)params;  ClassicUnsupported(context); }
+static void ClassicStub_GLLightModelf(GLcontext context, GLenum pname, GLfloat param) { (void)context; (void)pname; (void)param;  ClassicUnsupported(context); }
+static void ClassicStub_GLLightModelfv(GLcontext context, GLenum pname, const GLfloat *params) { (void)context; (void)pname; (void)params;  ClassicUnsupported(context); }
+static void ClassicStub_GLGetLightfv(GLcontext context, GLenum light, GLenum pname, GLfloat *params) { (void)context; (void)light; (void)pname; (void)params;  ClassicUnsupported(context); }
+static void ClassicStub_GLGetMaterialfv(GLcontext context, GLenum face, GLenum pname, GLfloat *params) { (void)context; (void)face; (void)pname; (void)params;  ClassicUnsupported(context); }
+static GLuint ClassicStub_GLGenLists(GLcontext context, GLsizei range) { (void)context; (void)range; return 0; }
+static void ClassicStub_GLDeleteLists(GLcontext context, GLuint list, GLsizei range) { (void)context; (void)list; (void)range; }
+static GLboolean ClassicStub_GLIsList(GLcontext context, GLuint list) { (void)context; (void)list; return GL_FALSE; }
+static void ClassicStub_GLNewList(GLcontext context, GLuint list, GLenum mode) { (void)context; (void)list; (void)mode;  ClassicUnsupported(context); }
+static void ClassicStub_GLEndList(GLcontext context) { (void)context;  ClassicUnsupported(context); }
+static void ClassicStub_GLCallList(GLcontext context, GLuint list) { (void)context; (void)list;  ClassicUnsupported(context); }
+static GLint ClassicStub_GLUBuild2DMipmaps(GLcontext context, GLenum target, GLint internalFormat, GLsizei width, GLsizei height, GLenum format, GLenum type, const GLvoid *data) { (void)context; (void)target; (void)internalFormat; (void)width; (void)height; (void)format; (void)type; (void)data; return GLU_INVALID_OPERATION; }
+/* GLU error text does not require a renderer. */
+static const GLubyte *Classic_GLUErrorString(GLenum errCode)
+{
+    switch (errCode) {
+    case GL_NO_ERROR: return (const GLubyte *)"no error";
+    case GL_INVALID_ENUM: case GLU_INVALID_ENUM: return (const GLubyte *)"invalid enum";
+    case GL_INVALID_VALUE: case GLU_INVALID_VALUE: return (const GLubyte *)"invalid value";
+    case GL_INVALID_OPERATION: case GLU_INVALID_OPERATION: return (const GLubyte *)"invalid operation";
+    case GL_OUT_OF_MEMORY: case GLU_OUT_OF_MEMORY: return (const GLubyte *)"out of memory";
+    case GL_STACK_OVERFLOW: return (const GLubyte *)"stack overflow";
+    case GL_STACK_UNDERFLOW: return (const GLubyte *)"stack underflow";
+    case GLU_INCOMPATIBLE_GL_VERSION: return (const GLubyte *)"incompatible GL version";
+    default: return (const GLubyte *)0;
+    }
+}
+static GLUquadricObj * ClassicStub_GLUNewQuadric(void) { return NULL; }
+static void ClassicStub_GLUDeleteQuadric(GLUquadricObj *q) { (void)q; }
+static void ClassicStub_GLUQuadricNormals(GLUquadricObj *q, GLenum normals) { (void)q; (void)normals; }
+static void ClassicStub_GLUQuadricTexture(GLUquadricObj *q, GLboolean textureCoords) { (void)q; (void)textureCoords; }
+static void ClassicStub_GLUQuadricDrawStyle(GLUquadricObj *q, GLenum drawStyle) { (void)q; (void)drawStyle; }
+static void ClassicStub_GLUQuadricOrientation(GLUquadricObj *q, GLenum orientation) { (void)q; (void)orientation; }
+static void ClassicStub_GLUCylinder(GLUquadricObj *q, GLdouble base, GLdouble top, GLdouble height, GLint slices, GLint stacks) { (void)q; (void)base; (void)top; (void)height; (void)slices; (void)stacks; }
+static void ClassicStub_GLUSphere(GLUquadricObj *q, GLdouble radius, GLint slices, GLint stacks) { (void)q; (void)radius; (void)slices; (void)stacks; }
+static void ClassicStub_GLUDisk(GLUquadricObj *q, GLdouble inner, GLdouble outer, GLint slices, GLint loops) { (void)q; (void)inner; (void)outer; (void)slices; (void)loops; }
+static void ClassicStub_GLUTInit(int *argcp, char **argv) { (void)argcp; (void)argv; }
+static void ClassicStub_GLUTInitDisplayMode(unsigned int mode) { (void)mode; }
+static void ClassicStub_GLUTInitWindowSize(int width, int height) { (void)width; (void)height; }
+static void ClassicStub_GLUTInitWindowPosition(int x, int y) { (void)x; (void)y; }
+static int ClassicStub_GLUTCreateWindow(const char *title) { (void)title; return 0; }
+static void ClassicStub_GLUTMainLoop(void) { }
+static void ClassicStub_GLUTDisplayFunc(void (*func)(void)) { (void)func; }
+static void ClassicStub_GLUTIdleFunc(void (*func)(void)) { (void)func; }
+static void ClassicStub_GLUTKeyboardFunc(void (*func)(unsigned char key, int x, int y)) { (void)func; }
+static void ClassicStub_GLUTReshapeFunc(void (*func)(int width, int height)) { (void)func; }
+static void ClassicStub_GLUTSwapBuffers(void) { }
+static void ClassicStub_GLUTPostRedisplay(void) { }
+static int ClassicStub_GLUTGet(GLenum state) { (void)state; return 0; }
+static void ClassicStub_GLUTGameModeString(const char *string) { (void)string; }
+static int ClassicStub_GLUTEnterGameMode(void) { return 0; }
+static void ClassicStub_GLUTLeaveGameMode(void) { }
+static int ClassicStub_GLUTGameModeGet(GLenum query) { (void)query; return 0; }
+static void ClassicStub_GLUTSolidCube(GLdouble size) { (void)size; }
+static void ClassicStub_GLUTSolidSphere(GLdouble radius, GLint slices, GLint stacks) { (void)radius; (void)slices; (void)stacks; }
+static void ClassicStub_GLUTSolidCone(GLdouble base, GLdouble height, GLint slices, GLint stacks) { (void)base; (void)height; (void)slices; (void)stacks; }
+static void ClassicStub_GLUTSolidTorus(GLdouble innerRadius, GLdouble outerRadius, GLint sides, GLint rings) { (void)innerRadius; (void)outerRadius; (void)sides; (void)rings; }
+static void ClassicStub_GLUTSolidDodecahedron(void) { }
+static void ClassicStub_GLNormalPointer(GLcontext context, GLenum type, GLsizei stride, const GLvoid *pointer) { (void)type; (void)stride; (void)pointer; ClassicUnsupported(context); }
+static void ClassicStub_GLUQuadricCallback(GLUquadricObj *q, GLenum which, MGLUfuncptr fn) { (void)q; (void)which; (void)fn; }
+static void ClassicStub_GLColorMaterial(GLcontext context, GLenum face, GLenum mode) { (void)context; (void)face; (void)mode;  ClassicUnsupported(context); }
+static void ClassicStub_GLTexEnvfv(GLcontext context, GLenum target, GLenum pname, const GLfloat *params)
+{
+    if (!context) return;
+    if (!params) { ClassicUnsupported(context); return; }
+    if (target != GL_TEXTURE_ENV || pname != GL_TEXTURE_ENV_MODE) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
+    /* Classic's Warp3D TexEnvi supports MODULATE, DECAL and REPLACE. */
+    if (params[0] != GL_MODULATE && params[0] != GL_DECAL && params[0] != GL_REPLACE) {
+        if (context->CurrentError == GL_NO_ERROR) context->CurrentError = GL_INVALID_ENUM;
+        return;
+    }
+    GLTexEnvi(context, target, pname, (GLint)params[0]);
+}
+
+
 
 const MGLDispatchTable MiniGLDispatchTable = {
     MINIGL_DISPATCH_ABI_VERSION,
@@ -288,4 +381,63 @@ const MGLDispatchTable MiniGLDispatchTable = {
     ClassicStub_GLReadBuffer,
     MGLCreateContextFromWindow,
     MGLCreateContextFromBitMap,
+    /* core GL -- fixed-function lighting */
+    ClassicStub_GLLightf,
+    ClassicStub_GLLightfv,
+    ClassicStub_GLMaterialf,
+    ClassicStub_GLMaterialfv,
+    ClassicStub_GLLightModelf,
+    ClassicStub_GLLightModelfv,
+    ClassicStub_GLGetLightfv,
+    ClassicStub_GLGetMaterialfv,
+
+    /* core GL -- display lists */
+    ClassicStub_GLGenLists,
+    ClassicStub_GLDeleteLists,
+    ClassicStub_GLIsList,
+    ClassicStub_GLNewList,
+    ClassicStub_GLEndList,
+    ClassicStub_GLCallList,
+
+    /* GLU */
+    ClassicStub_GLUBuild2DMipmaps,
+    Classic_GLUErrorString,
+    ClassicStub_GLUNewQuadric,
+    ClassicStub_GLUDeleteQuadric,
+    ClassicStub_GLUQuadricNormals,
+    ClassicStub_GLUQuadricTexture,
+    ClassicStub_GLUQuadricDrawStyle,
+    ClassicStub_GLUQuadricOrientation,
+    ClassicStub_GLUCylinder,
+    ClassicStub_GLUSphere,
+    ClassicStub_GLUDisk,
+
+    /* GLUT */
+    ClassicStub_GLUTInit,
+    ClassicStub_GLUTInitDisplayMode,
+    ClassicStub_GLUTInitWindowSize,
+    ClassicStub_GLUTInitWindowPosition,
+    ClassicStub_GLUTCreateWindow,
+    ClassicStub_GLUTMainLoop,
+    ClassicStub_GLUTDisplayFunc,
+    ClassicStub_GLUTIdleFunc,
+    ClassicStub_GLUTKeyboardFunc,
+    ClassicStub_GLUTReshapeFunc,
+    ClassicStub_GLUTSwapBuffers,
+    ClassicStub_GLUTPostRedisplay,
+    ClassicStub_GLUTGet,
+    ClassicStub_GLUTGameModeString,
+    ClassicStub_GLUTEnterGameMode,
+    ClassicStub_GLUTLeaveGameMode,
+    ClassicStub_GLUTGameModeGet,
+    ClassicStub_GLUTSolidCube,
+    ClassicStub_GLUTSolidSphere,
+    ClassicStub_GLUTSolidCone,
+    ClassicStub_GLUTSolidTorus,
+    ClassicStub_GLUTSolidDodecahedron,
+    ClassicStub_GLNormalPointer,
+    ClassicStub_GLUQuadricCallback,
+    ClassicStub_GLColorMaterial,
+    ClassicStub_GLTexEnvfv,
+    GLNormal3fv, /* 29.1: append-only slot 205. */
 };

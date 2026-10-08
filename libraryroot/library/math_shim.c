@@ -7,8 +7,10 @@
  *
  * The supplied PiStorm3D archive also references cexp().  The installed libm
  * does not provide it, so it is implemented locally using exp/sin/cos from
- * libm.  LIB_CFLAGS contains -fno-builtin, preventing GCC from recognising
- * this implementation as another cexp call.
+ * libm. Compile this implementation with -fno-builtin -fno-fast-math.
+ * The common Classic makefile applies those flags to this object even when
+ * the rest of the backend uses fast-math. Otherwise GCC 6.5 folds the
+ * sin/cos pair below into a recursive cexp call.
  */
 #include <exec/types.h>
 #include <exec/libraries.h>

@@ -1,6 +1,5 @@
 #include <stdio.h>
 #include <proto/minigl.h>
-#include <clib/minigl_open_protos.h>
 
 int main(void)
 {
@@ -9,7 +8,7 @@ int main(void)
 
     puts("Opening minigl.library...");
     if (!MiniGLOpen()) {
-        puts("Could not open minigl.library v4");
+        puts("Could not open minigl.library V29 / ABI 5");
         return 20;
     }
 

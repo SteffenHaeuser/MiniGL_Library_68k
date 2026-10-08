@@ -32,8 +32,8 @@
 #endif
 
 #define LIBNAME "minigl.library"
-#define VERSION 27
-#define REVISION 0
+#define VERSION 29
+#define REVISION 1
 #define MINIGL_STRINGIFY_INNER(value) #value
 #define MINIGL_STRINGIFY(value) MINIGL_STRINGIFY_INNER(value)
 #ifdef MINIGL_CLASSIC_ORTHO
@@ -55,7 +55,7 @@ static const char LibName[] = LIBNAME;
 
 static const char LibId[] =
     "$VER: minigl.library " MINIGL_STRINGIFY(VERSION) "." MINIGL_STRINGIFY(REVISION)
-    " (21.9.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID MINIGL_VARIANT_ID "\r\n";
+    " (5.10.2026) " MINIGL_BACKEND_ID ", direct-backend dispatch ABI " MINIGL_COMPILER_ID MINIGL_VARIANT_ID "\r\n";
 
 /* Library bases used by the AmigaOS NDK proto headers. */
 struct ExecBase *SysBase = 0;

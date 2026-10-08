@@ -65,12 +65,12 @@ typedef struct Matrix_t
 #define MGLMASK_0001 (MGLMAT_IDENTITY|MGLMAT_ROTATION|MGLMAT_TRANSLATION|MGLMAT_UNIFORM_SCALE|MGLMAT_GENERAL_SCALE|MGLMAT_ORTHO|MGLMAT_0001|MGLMAT_ROT001|MGLMAT_ROT010|MGLMAT_ROT100)
 //ortho and special case rotations added by surgeon
 
-//surgeon: mask for !MLMASK_0001
 /* Full 4x4 inverse, column-major in and out; GL_FALSE for a singular
  * matrix (gl/src/matrix.c). GL_EYE_LINEAR texgen needs it -- m_DoInvert
  * covers only the upper 3x3 block. */
 GLboolean m_Invert4(const GLfloat *m, GLfloat *out);
 
+//surgeon: mask for !MLMASK_0001
 #define MGLMASK_NONE	(MGLMAT_PERSPECTIVE|MGLMAT_UNKNOWN)
 
 #endif

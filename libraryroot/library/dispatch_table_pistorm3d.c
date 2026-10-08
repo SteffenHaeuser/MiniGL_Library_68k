@@ -10,6 +10,12 @@ extern void mglChooseVertexBufferSize(int size);
 extern void mglChooseWindowMode(GLboolean flag);
 extern void mglProposeCloseDesktop(GLboolean closeme);
 
+/* glPolygonOffset dispatches to the backend's real implementation (2026-09-11).
+ * This slot used to call a library-side no-op even though MiniGLV3D has
+ * implemented GLPolygonOffset since 2026-08-30; the static games got the real
+ * thing while every shared-library client silently got nothing. */
+extern void GLPolygonOffset(GLcontext context, GLfloat factor, GLfloat units);
+
 const MGLDispatchTable MiniGLDispatchTable = {
     MINIGL_DISPATCH_ABI_VERSION,
     (ULONG)sizeof(MGLDispatchTable),
@@ -145,6 +151,8 @@ const MGLDispatchTable MiniGLDispatchTable = {
     mglProhibitMipMapping,
     mglProposeCloseDesktop,
     GLPolygonOffset,
+    /* --- Published V23 order (2026-09-11), same as the struct: this
+     * initialiser is positional, so keep it in step with the header. --- */
     GLClientActiveTextureARB,
     GLInterleavedArrays,
     GLMultiDrawArrays,
@@ -152,4 +160,90 @@ const MGLDispatchTable MiniGLDispatchTable = {
     GLBlendFuncSeparate,
     GLIsTexture,
     mglChooseZBufferDepth,
+    /* --- APPENDED 2026-09-12 (audit fix 4), matching the struct. --- */
+    GLLineWidth,
+    /* --- APPENDED 2026-09-12 (audit fix 7). --- */
+    GLTexGenfv,
+    /* --- APPENDED 2026-09-12 (audit fix 9), 139 and 140. --- */
+    GLCopyTexImage2D,
+    GLCopyTexSubImage2D,
+    /* --- APPENDED 2026-09-12 (audit item 10), 141 to 151. --- */
+    GLAreTexturesResident,
+    GLEdgeFlag,
+    GLEdgeFlagPointer,
+    GLEdgeFlagv,
+    GLGetDoublev,
+    GLGetPointerv,
+    GLIndexi,
+    GLIndexiv,
+    GLIndexPointer,
+    GLPrioritizeTextures,
+    GLReadBuffer,
+
+    /* APPENDED 2026-09-20 -- render into a window the host already opened.
+     * All three tables grow together: a short positional initialiser
+     * zero-fills the trailing slot while sizeof still reports the full struct,
+     * so the ABI check passes and the call NULL-derefs. */
+    MGLCreateContextFromWindow,
+    MGLCreateContextFromBitMap,
+
+    /* core GL -- fixed-function lighting */
+    GLLightf,
+    GLLightfv,
+    GLMaterialf,
+    GLMaterialfv,
+    GLLightModelf,
+    GLLightModelfv,
+    GLGetLightfv,
+    GLGetMaterialfv,
+
+    /* core GL -- display lists */
+    GLGenLists,
+    GLDeleteLists,
+    GLIsList,
+    GLNewList,
+    GLEndList,
+    GLCallList,
+
+    /* GLU */
+    GLUBuild2DMipmaps,
+    GLUErrorString,
+    GLUNewQuadric,
+    GLUDeleteQuadric,
+    GLUQuadricNormals,
+    GLUQuadricTexture,
+    GLUQuadricDrawStyle,
+    GLUQuadricOrientation,
+    GLUCylinder,
+    GLUSphere,
+    GLUDisk,
+
+    /* GLUT */
+    GLUTInit,
+    GLUTInitDisplayMode,
+    GLUTInitWindowSize,
+    GLUTInitWindowPosition,
+    GLUTCreateWindow,
+    GLUTMainLoop,
+    GLUTDisplayFunc,
+    GLUTIdleFunc,
+    GLUTKeyboardFunc,
+    GLUTReshapeFunc,
+    GLUTSwapBuffers,
+    GLUTPostRedisplay,
+    GLUTGet,
+    GLUTGameModeString,
+    GLUTEnterGameMode,
+    GLUTLeaveGameMode,
+    GLUTGameModeGet,
+    GLUTSolidCube,
+    GLUTSolidSphere,
+    GLUTSolidCone,
+    GLUTSolidTorus,
+    GLUTSolidDodecahedron,
+    GLNormalPointer,
+    GLUQuadricCallback,
+    GLColorMaterial,
+    GLTexEnvfv,
+    GLNormal3fv, /* 29.1: append-only slot 205. */
 };

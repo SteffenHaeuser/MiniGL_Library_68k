@@ -34,7 +34,7 @@ typedef struct PolyBuffer_s
 {
 	int numverts;
 	int nextfree;	//used for clipping
-	ULONG type;	//w3dtype
+	ULONG type;
 	ULONG verts[64]; //check length for triangle-chains
 } PolyBuffer;
 

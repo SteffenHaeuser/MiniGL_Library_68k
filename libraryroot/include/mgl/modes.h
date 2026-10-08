@@ -15,15 +15,11 @@
 #ifndef __MGL_MODES_H
 #define __MGL_MODES_H
 
-/* Warp3D/Warp3D.h dropped -- nothing in this file actually references a
- * W3D_* type, confirmed by grep against MiniGL's original (only this now-
- * removed #include line matched). */
-
 #define MGL_MAX_MODE 80
 
 typedef struct
 {
-	GLint id; // blackbox id used for mglCreateContextID()
+	GLint id; // blackbox id used for mglCreateContextFromID()
 	GLint width,height;     // screenmode size
 	GLint bit_depth;        // depth of mode
 	char  mode_name[MGL_MAX_MODE]; // name for this mode

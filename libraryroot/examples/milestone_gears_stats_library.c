@@ -50,7 +50,6 @@
  */
 
 #include <proto/minigl.h>
-#include <clib/minigl_open_protos.h>
 #include <math.h>
 #include <stdio.h>
 #include <string.h>

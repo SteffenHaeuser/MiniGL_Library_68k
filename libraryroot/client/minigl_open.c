@@ -25,8 +25,20 @@ BOOL MiniGLOpen(void)
     MiniGLBase = NULL;
     return 0;
 }
-	if (dispatch->abiVersion != MINIGL_DISPATCH_ABI_VERSION ||
-    dispatch->structSize < sizeof(MGLDispatchTable))
+    /*
+     * abiVersion is compared for EQUALITY, not ">= mine". It identifies the
+     * token ABI, and 3 -> 4 changed the value of 230 GL names rather than
+     * adding anything, so a newer library is exactly as wrong for this client
+     * as an older one. structSize keeps its "at least mine" test: that one is
+     * about entry points being present, where newer really is a superset.
+     *
+     * This protects a client against the wrong library. It CANNOT protect the
+     * other direction -- an old binary opening a new library -- because that
+     * client's own compiled-in check is `< 3`, which a 4 satisfies. Only a new
+     * entry point, or publishing an identity its check rejects, can refuse it.
+     */
+    if (dispatch->abiVersion != MINIGL_DISPATCH_ABI_VERSION ||
+        dispatch->structSize < sizeof(MGLDispatchTable))
     {
         CloseLibrary(MiniGLBase);
         MiniGLBase = 0;

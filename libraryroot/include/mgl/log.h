@@ -16,40 +16,7 @@
 #define __LOG_H
 
 /*
-** Logging was removed in final version
+** This header defines no logging macros.
 */
 
-/*
-** It is probably difficult to support logging of gl calls on other compilers,
-** since the egcs/gcc preprocessor supports variable argument macros, and
-** I am using it :)
-*/
-
-/*
-#ifdef NLOGGING
-#define LOG(level, func, format, args...)
-#else
-#ifdef __PPC__
-extern int MGLDebugLevel;
-#define LOG(level, func, format, args...) \
-	if (MGLDebugLevel >= level)            \
-	{                                       \
-		kprintf("[MiniGL::%s] ", #func);     \
-		kprintf(format , __VA_ARGS__ );           \
-		kprintf("\n");                         \
-	}
-#else
-extern int MGLDebugLevel;
-#define LOG(level, func, format, args...) \
-	if (MGLDebugLevel >= level)            \
-	{                                       \
-		mykprintf("[MiniGL::%s] ", #func);   \
-		mykprintf(format , __VA_ARGS__ );         \
-		mykprintf("\n");                       \
-	}
-#endif
-
-#endif
-
-*/
 #endif
