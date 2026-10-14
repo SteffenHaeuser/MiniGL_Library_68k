@@ -1,0 +1,30 @@
+{
+  "zip_sha256": "3991680459e44cc0f6d84c67d37e2865fa5e88d588139e1e89e8f46cd9a8c3ae",
+  "files": {
+    "minigl-shared-library/include/clib/minigl_protos.h": "9f6794d90e67294b414e861894245d57d9462687607961c8f0dd3fb014e2bc0d",
+    "minigl-shared-library/include/libraries/minigl.h": "8b894cf23524d1dc69cc3745fb936b894db304c2f35de160c6adf5a23c472df1",
+    "minigl-shared-library/include/libraries/minigl_dispatch.h": "c265eb2471d0d36242737e167f6882cd4375033884a26b776dafc3c40285f512",
+    "minigl-shared-library/include/libraries/minigl_offsets.h": "8f77679913807f0d504f19f55088a571659d3c626219f2f476950aedf03b762f",
+    "minigl-shared-library/include/mgl/clip.h": "e2d6725bfda0e08987495fcbc2ed1df2c14d386f1f05b4fdc646f47045dfaebe",
+    "minigl-shared-library/include/mgl/config.h": "18dd608d2bc325b6a351a0a6018d8a55d085a798d7db95f16848eec89708138e",
+    "minigl-shared-library/include/mgl/context.h": "062f3ded53a879f596b8481ee18ca41e467574be5381cf8ba616739eba5d7869",
+    "minigl-shared-library/include/mgl/gl.h": "5c3a053402eda38582007eece8be5cbaf13732105e46fce2830607d9b009fcb2",
+    "minigl-shared-library/include/mgl/glut.h": "de127b0e551383dd195d259abf958481c4a81641dd5e2b5fe56c3ea62af17188",
+    "minigl-shared-library/include/mgl/log.h": "7fd7b2bc90f5a8ca2d95567e155e758c6e196b6f08650afc8cab5bb75a69537e",
+    "minigl-shared-library/include/mgl/matrix.h": "935c47ccc20893b152365a80a2738fcb7c9900d14ada5fc3cf851aa2f09c9044",
+    "minigl-shared-library/include/mgl/mglmacros.h": "50c4cbc64bc554d94789efc1206c15acee78f1bb446a36f90c874ea1a6ad0287",
+    "minigl-shared-library/include/mgl/minigl.h": "e5b1c49bdd73ad4cc6263a8af5bdc1167c4bfc3e8de069cef3c1278aeee9ed9a",
+    "minigl-shared-library/include/mgl/modes.h": "09af4a7694d1e9425c0c06c1d34dc730c27010fc2fc65759186ec0f1fca8965a",
+    "minigl-shared-library/include/mgl/vertexbuffer.h": "6babc5ae0d2d17aef3d121b4129637c0410ea32bb1591d22337c8dbe34ed9323",
+    "minigl-shared-library/include/proto/minigl.h": "f6b8e5233dae3e894d8420610b26d354abacf4e1df9d6f9b846237ff36417b6f",
+    "backend/include/v3d_clbuf.h": "e916c3820ba0dc6fa6609ec90e7f62b95f1f474f16331066abd39934cae29c30",
+    "backend/include/v3d_commands.h": "d81ff2874556e4af82c2d06657ffb57e3a433e0d2e689691f78b140b32c773a6",
+    "backend/include/v3d_context.h": "daf22aeb456a6c9a753b810e3f66fd455f2e7a7ff75cc65d5867058a012557a6",
+    "backend/include/v3d_device.h": "63ceb333319c6682ec1854bc214b8567567f572c0b3b8577bfa277348ff668a0",
+    "backend/include/v3d_frame.h": "153321461ac07c1034d06e7783419d67fadd655dd2672c97d3eca6257da80f02",
+    "backend/include/v3d_shader_assembler.h": "2f99fb2916c1f9d8407cdaa9815f1a15f5cae629c42fa82a48900e72ab4344b3",
+    "backend/include/v3d_texture.h": "67a75ea6ba3e7a08511c0b9f66abb923603d0362131cfcfb38ecb1b3d254c02e",
+    "backend/include/v3d_types.h": "2e02ae5a36459a757e950527afc0824be718197a0f301814063d2134bfd15833",
+    "backend/include/v3d_vertex.h": "7bf16ff763cac5d422f85f9df025f28c02ecd588257ebcc2ad618bafb4639378"
+  }
+}

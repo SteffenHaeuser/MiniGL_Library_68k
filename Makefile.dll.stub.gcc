@@ -1,0 +1,49 @@
+# WarpOS MiniGL direct-dispatch STUB DLL using Hyperion's DLL runtime.
+# No real MiniGL backend archive is required.
+# The output uses the normal runtime filename so it can be copied directly
+# in place of the real DLL for testing, but lives in bin/stub to avoid
+# overwriting the real build.
+# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay; see Makefile.dll.gcc.
+CC      := ppc-morphos-gcc
+CPU     ?= 604e
+OBJDIR  ?= obj/v29_1/dll_stub
+OUT     ?= bin/stub/minigl_ppc.dll
+ELF2EXE2 ?= true
+
+CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O2 -mmultiple -Wall -Wno-unused-parameter \
+         -fomit-frame-pointer -MMD -MP \
+         -ImglQ3/wos_include -Iinclude -Ihyperion_dll
+
+WARPUP_LIBS ?= -lamigawos
+
+OBJS = $(OBJDIR)/minigl_ppc_dispatch_stub.o \
+       $(OBJDIR)/dllstartup.o \
+       $(OBJDIR)/dll.o \
+       $(OBJDIR)/dllimport.o
+
+.PHONY: all clean
+all: $(OUT)
+
+$(OBJDIR) bin/stub:
+	mkdir -p $@
+
+$(OBJDIR)/minigl_ppc_dispatch_stub.o: ppc_dll/minigl_ppc_dispatch_stub.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -Werror=incompatible-pointer-types -Werror=missing-field-initializers -c $< -o $@
+
+$(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT): $(OBJS) | bin/stub
+	$(CC) $(CFLAGS) $(OBJS) $(WARPUP_LIBS) -o $@
+	$(ELF2EXE2) $@ $@
+
+clean:
+	rm -rf $(OBJDIR) $(OUT)
+
+-include $(OBJS:.o=.d)

@@ -1,0 +1,68 @@
+# WarpOS MiniGL V29 PPC DLL using Hyperion's DLL runtime.
+# The MiniGL implementation is the bundled mglQ3 tree.
+# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
+# ppc-morphos-wos-toolchain), same adaptation as the V10 tree: -warpup ->
+# -DWARPUP --specs=warpup, -lppcamiga (vintage toolchain only) -> -lamigawos
+# (classic amiga.lib helpers CreatePort/DeletePort... used by hyperion_dll).
+CC      := ppc-morphos-gcc
+CPU     ?= 604e
+OBJDIR  ?= obj/v29_1/dll
+OUT     ?= bin/minigl_ppc.dll
+# Elf2Exe2 is an AmigaOS-native binary and cannot run on the Linux build host;
+# WarpOS's patched loader runs the raw linked PPC ELF directly (hardware-
+# confirmed with the V10 DLL in every port), so this is a no-op by default.
+ELF2EXE2 ?= true
+
+MGLQ3_DIR ?= mglQ3
+MGLQ3_LIB ?= $(MGLQ3_DIR)/lib/libmgl-wos-v29_1.a
+
+# Private mgl-only forwarding headers select the WOS/Warp3D context.
+# Do not put mglQ3/include on -I: its 68k OS headers would shadow the PPC SDK.
+# Public include/mgl is the V29 client SDK; its context is not the backend's.
+CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
+         -fomit-frame-pointer -MMD -MP \
+         -ImglQ3/wos_include -Iinclude -Ihyperion_dll
+
+# Override if the local WarpOS toolchain/backend needs additional libraries.
+MGLQ3_LIBS  ?= -lm
+WARPUP_LIBS ?= -lamigawos
+
+OBJS = $(OBJDIR)/minigl_ppc_dispatch.o \
+       $(OBJDIR)/dllstartup.o \
+       $(OBJDIR)/dll.o \
+       $(OBJDIR)/dllimport.o
+
+.DEFAULT_GOAL := all
+.PHONY: all mglq3 clean FORCE
+FORCE:
+all: $(OUT)
+
+mglq3: $(MGLQ3_LIB)
+
+$(MGLQ3_LIB): FORCE
+	$(MAKE) -C $(MGLQ3_DIR) -f Makefile.wos.gcc CPU=$(CPU)
+
+$(OBJDIR) bin:
+	mkdir -p $@
+
+$(OBJDIR)/minigl_ppc_dispatch.o: ppc_dll/minigl_ppc_dispatch.c include/libraries/minigl_dispatch.h | $(OBJDIR)
+	$(CC) $(CFLAGS) -Werror=incompatible-pointer-types -Werror=missing-field-initializers -c $< -o $@
+
+$(OBJDIR)/dllstartup.o: hyperion_dll/dllstartup.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/dll.o: hyperion_dll/dll.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OBJDIR)/dllimport.o: hyperion_dll/dllimport.c | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(OUT): $(OBJS) $(MGLQ3_LIB) | bin
+	$(CC) $(CFLAGS) $(OBJS) $(MGLQ3_LIB) $(MGLQ3_LIBS) $(WARPUP_LIBS) -o $@
+	$(ELF2EXE2) $@ $@
+
+clean:
+	rm -rf $(OBJDIR) $(OUT)
+	$(MAKE) -C $(MGLQ3_DIR) -f Makefile.wos.gcc clean
+
+-include $(OBJS:.o=.d)
