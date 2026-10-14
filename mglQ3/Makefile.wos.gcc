@@ -1,0 +1,44 @@
+# Build the bundled mglQ3 core for WarpOS/PPC with GCC.
+# Toolchain: ppc-morphos-gcc 15.2 + mos2wos "warpup" overlay (docker image
+# ppc-morphos-wos-toolchain). Flags follow the hardware-proven V10 backend
+# build (Makefile.backend.gcc there): -O3, no fast-math (clip/W math), no
+# unwind tables, -DINLINE=__inline. The image's os-includeppc already carries
+# Warp3D/, powerpc/ and the proto/ headers sysinc.h needs; the bundled
+# mglQ3/include (mgl/, pragmas/, clib/, inline/) is searched first.
+CC      := ppc-morphos-gcc
+AR      := ppc-morphos-ar
+RANLIB  := ppc-morphos-ranlib
+
+CPU     ?= 604e
+OBJDIR  ?= obj_wos_v29_1_gcc
+LIBDIR  ?= lib
+LIBNAME ?= $(LIBDIR)/libmgl-wos-v29_1.a
+
+CFLAGS = -DWARPUP --specs=warpup -mcpu=$(CPU) -O3 -mmultiple -Wall \
+         -fomit-frame-pointer -fno-asynchronous-unwind-tables -fno-fast-math \
+         -fno-strict-aliasing -fgnu89-inline -MMD -MP -DINLINE=__inline -Iwos_include -I../include -Isrc
+# wos_include contains only forwarding mgl/ headers; the WarpUP SDK supplies
+# proto/, inline/, Warp3D/ and all OS headers. Public V3D context is client-only.
+
+SOURCES = src/context.c src/init.c src/fog.c src/texture.c src/others.c \
+          src/matrix.c src/vertexbuffer.c src/hclip.c src/draw.c src/aclip.c \
+          src/vertexarray.c src/vertexelements.c src/glu.c
+OBJS = $(patsubst src/%.c,$(OBJDIR)/%.o,$(SOURCES))
+
+.PHONY: all clean
+all: $(LIBNAME)
+
+$(OBJDIR) $(LIBDIR):
+	mkdir -p $@
+
+$(OBJDIR)/%.o: src/%.c Makefile.wos.gcc | $(OBJDIR)
+	$(CC) $(CFLAGS) -c $< -o $@
+
+$(LIBNAME): $(OBJS) | $(LIBDIR)
+	$(AR) rcs $@ $(OBJS)
+	-$(RANLIB) $@
+
+clean:
+	rm -rf $(OBJDIR) $(LIBNAME)
+
+-include $(OBJS:.o=.d)
